@@ -291,6 +291,22 @@ a.btn{color:inherit;text-decoration:none}
 @keyframes up{from{transform:translateY(40px);opacity:.4}to{transform:none;opacity:1}}
 @keyframes drop{from{transform:translateY(-30px);opacity:0}to{transform:none;opacity:1}}
 @keyframes fade{from{opacity:0}to{opacity:1}}
+/* Installer l'appli */
+.install-card{box-shadow:inset 0 0 0 1.5px var(--brass)}
+.install-card p{margin:2px 0 0}
+.install-before{margin:6px 0 0;background:var(--brass-soft);color:var(--brass-ink);border-radius:13px;padding:10px 12px;font-weight:650;font-size:14px}
+.install-steps{list-style:none;margin:14px 0 12px;padding:0;display:flex;flex-direction:column;gap:14px}
+.install-steps li{display:flex;gap:12px;align-items:flex-start;font-size:15.5px;line-height:1.75}
+.install-n{flex:none;width:26px;height:26px;border-radius:50%;background:var(--brass);color:var(--on-brass);display:grid;place-items:center;font:800 14px/1 var(--f-display);margin-top:1px}
+.key{display:inline-flex;align-items:center;gap:5px;vertical-align:middle;padding:2px 8px;border-radius:8px;background:var(--surface);box-shadow:inset 0 0 0 1px var(--line);font-weight:700;font-size:14px;line-height:1.5;white-space:nowrap}
+.key .ic{color:var(--cold, #2F6FD6)}
+.key-logo{padding:2px}
+.key .logo{width:20px;height:20px;border-radius:6px}
+.code-inline{font-family:var(--f-display);letter-spacing:.08em}
+.ob-install{display:flex;align-items:center;gap:11px;margin-top:6px;padding:12px 13px;border-radius:16px;background:var(--surface);box-shadow:inset 0 0 0 1px var(--line)}
+.ob-install p{margin:0;flex:1;display:flex;flex-direction:column;gap:1px;font-size:13.5px;color:var(--muted);line-height:1.35}
+.ob-install b{color:var(--ink);font-size:15px}
+.ob-install-ic{flex:none;width:36px;height:36px;border-radius:11px;background:var(--brass-soft);color:var(--brass-ink);display:grid;place-items:center}
 @media (prefers-reduced-motion: reduce){ *{animation:none !important} }
 
 /* ---------- Ordinateur ---------- */

@@ -1,19 +1,48 @@
 // Appels au serveur et session enregistrée sur ce téléphone.
+// La session est aussi copiée dans un cookie : quand on installe l'appli sur iPhone,
+// Safari recopie ses cookies (pas le localStorage) dans l'appli installée, qui reste ainsi connectée.
 const KEY = 'chez-nous-session'
+const COOKIE = 'chez_nous_s'
+const COOKIE_DAYS = 400
 
-export function loadSession() {
+const valid = (s) => (s && s.colocId && s.memberId && s.token ? { colocId: s.colocId, memberId: s.memberId, token: s.token } : null)
+
+function readCookie() {
   try {
-    const s = JSON.parse(localStorage.getItem(KEY))
-    return s && s.colocId && s.memberId && s.token ? s : null
+    const m = document.cookie.match(new RegExp('(?:^|;\\s*)' + COOKIE + '=([^;]+)'))
+    return m ? valid(JSON.parse(decodeURIComponent(m[1]))) : null
   } catch {
     return null
   }
+}
+function writeCookie(s) {
+  try {
+    const secure = location.protocol === 'https:' ? '; Secure' : ''
+    const val = s ? encodeURIComponent(JSON.stringify(s)) : ''
+    document.cookie = COOKIE + '=' + val + '; Path=/; SameSite=Strict' + secure + '; Max-Age=' + (s ? COOKIE_DAYS * 86400 : 0)
+  } catch { /* cookies bloqués : tant pis */ }
+}
+
+export function loadSession() {
+  let s = null
+  try { s = valid(JSON.parse(localStorage.getItem(KEY))) } catch { /* rien */ }
+  if (!s) {
+    s = readCookie()
+    if (s) try { localStorage.setItem(KEY, JSON.stringify(s)) } catch { /* rien */ }
+  }
+  if (s) writeCookie(s) // Safari efface au bout de 7 jours les cookies posés en JS : on le repose à chaque ouverture
+  return s
 }
 export function saveSession(s) {
   try {
     if (s) localStorage.setItem(KEY, JSON.stringify(s))
     else localStorage.removeItem(KEY)
   } catch { /* stockage indisponible : la session ne survivra pas au rechargement */ }
+  writeCookie(valid(s))
+}
+/** Repose le cookie juste avant une installation. */
+export function touchSession() {
+  loadSession()
 }
 
 export class ApiError extends Error {

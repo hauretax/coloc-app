@@ -2,6 +2,7 @@
 // Déjà dans la coloc ? On choisit son prénom et on valide depuis un appareil déjà connecté.
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
+import { InstallSheet, useInstallAction } from './Install.jsx'
 import { Icon, Av, Avs, Label, Stepper, Logo, copyText } from './ui.jsx'
 import { cleanCode, fmtCode, PALETTE, MAX_MEMBERS, MIN_MEMBERS, plural } from '../shared/rules.js'
 
@@ -48,6 +49,8 @@ export default function Onboarding({ msg, onDone }) {
   const [copied, setCopied] = useState(false)
   const [claim, setClaim] = useState(null)
   const [claimErr, setClaimErr] = useState('')
+  const [tuto, setTuto] = useState(false)
+  const { ins, run: install } = useInstallAction({ onTuto: () => setTuto(true) })
   const doneRef = useRef(onDone)
   doneRef.current = onDone
 
@@ -156,6 +159,13 @@ export default function Onboarding({ msg, onDone }) {
         </section>
         <div className="ob-or">ou</div>
         <button type="button" className="btn btn-ghost btn-block" onClick={() => go('create')}><Icon n="plus" s={18} />Créer une coloc</button>
+        {!ins.installed && ins.platform !== 'desktop' ? (
+          <div className="ob-install">
+            <span className="ob-install-ic"><Icon n="phone" s={19} /></span>
+            <p><b>Installe l’appli</b><span>{ins.platform === 'ios' ? 'Sur iPhone, les notifs ne marchent qu’une fois installée.' : 'Une icône sur ton écran d’accueil, comme une vraie appli.'}</span></p>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={install}><Icon n="download" s={16} />Installer</button>
+          </div>
+        ) : null}
       </>
     )
   } else if (step === 'who') {
@@ -279,5 +289,10 @@ export default function Onboarding({ msg, onDone }) {
     )
   }
 
-  return <div className="ob"><div className="ob-inner">{inner}</div></div>
+  return (
+    <div className="shell">
+      <div className="ob"><div className="ob-inner">{inner}</div></div>
+      {tuto ? <InstallSheet onClose={() => setTuto(false)} /> : null}
+    </div>
+  )
 }

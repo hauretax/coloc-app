@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, loadSession, saveSession } from './api.js'
 import { Icon, Av, Avs, Chips, Label, Sheet, Stepper, Logo, copyText } from './ui.jsx'
 import Onboarding from './Onboarding.jsx'
-import { pushStatus, enablePush, resyncPush, isStandalone } from './push.js'
+import { InstallCard, InstallSheet, useInstallAction } from './Install.jsx'
+import { pushStatus, enablePush, resyncPush } from './push.js'
 import {
   KINDS, WHAT, TYPES, IKINDS, STAGES, BUCKETS, MAX_MEMBERS, MIN_MEMBERS, MAX_AHEAD, LISTS, WEEK, WD, WD_LETTER,
   todayISO, hm, untilLabel, bucket, whenShort, dayShort, isoAdd, listNames, plural, fmtCode, weekday, daysLabel,
@@ -266,6 +267,7 @@ function Home({ c }) {
         <Tonight c={c} />
       </div>
       <div className="col">
+        <InstallCard onTuto={() => c.open('install')} flash={c.flash} />
         <PushCard c={c} />
         <LostNudge c={c} />
         <Who c={c} />
@@ -416,36 +418,19 @@ function Door({ c }) {
 
 function PushCard({ c }) {
   const [hidden, setHidden] = useState(() => { try { return localStorage.getItem('chez-nous-push-hide') === '1' } catch { return false } })
-  const [installEvt, setInstallEvt] = useState(() => window.__installPrompt || null)
-  useEffect(() => {
-    const on = () => setInstallEvt(window.__installPrompt || null)
-    window.addEventListener('installable', on)
-    return () => window.removeEventListener('installable', on)
-  }, [])
-  if (hidden || c.push === 'on' || c.push === 'unsupported') return null
+  // Sur iPhone dans Safari, la carte « Installe l'appli » s'en charge : les notifs viennent avec l'installation.
+  if (hidden || c.push === 'on' || c.push === 'unsupported' || c.push === 'ios-browser') return null
   const hide = () => { try { localStorage.setItem('chez-nous-push-hide', '1') } catch { /* rien */ } setHidden(true) }
-  const install = installEvt && !isStandalone() ? (
-    <button type="button" className="btn btn-ghost btn-sm" onClick={async () => { installEvt.prompt(); await installEvt.userChoice; window.__installPrompt = null; setInstallEvt(null) }}>
-      Installer l’appli
-    </button>
-  ) : null
-  let title, text, action = null
-  if (c.push === 'ios-browser') {
-    title = 'Les notifs sur iPhone'
-    text = 'Dans Safari : bouton Partager, puis « Sur l’écran d’accueil ». Ouvre ensuite l’appli depuis son icône pour activer les notifs.'
-  } else if (c.push === 'denied') {
-    title = 'Notifs bloquées'
-    text = 'Réautorise-les pour ce site dans les réglages du navigateur, sinon tu ne sauras pas qui joue ou qui attend en bas.'
-  } else {
-    title = 'Active les notifs'
-    text = 'C’est par là qu’on te dit que quelqu’un joue du sax, attend devant la porte ou propose un film.'
-    action = <button type="button" className="btn btn-primary btn-sm" onClick={c.enable}><Icon n="bell" s={16} />Activer</button>
-  }
+  const denied = c.push === 'denied'
   return (
     <section className="card push-card">
-      <div className="card-head"><h4>{title}</h4><button type="button" className="card-link" onClick={hide}>Plus tard</button></div>
-      <p className="muted">{text}</p>
-      {action || install ? <div className="actions">{action}{install}</div> : null}
+      <div className="card-head"><h4>{denied ? 'Notifs bloquées' : 'Active les notifs'}</h4><button type="button" className="card-link" onClick={hide}>Plus tard</button></div>
+      <p className="muted">
+        {denied
+          ? 'Réautorise-les pour ce site dans les réglages du navigateur, sinon tu ne sauras pas qui joue ou qui attend en bas.'
+          : 'C’est par là qu’on te dit que quelqu’un joue du sax, attend devant la porte ou propose un film.'}
+      </p>
+      {denied ? null : <div className="actions"><button type="button" className="btn btn-primary btn-sm" onClick={c.enable}><Icon n="bell" s={16} />Activer</button></div>}
     </section>
   )
 }
@@ -886,6 +871,7 @@ function Sheets({ c, sheet }) {
     case 'lost': return <LostSheet {...props} />
     case 'photo': return <PhotoSheet {...props} />
     case 'tricount': return <TricountSheet {...props} />
+    case 'install': return <InstallSheet onClose={c.close} code={c.st.code} />
     default: return null
   }
 }
@@ -1112,18 +1098,33 @@ function ColocSheet({ c }) {
         <button type="button" className="btn btn-ghost btn-sm" onClick={() => c.open('tricount')}><Icon n="link" s={16} />{st.links.tricount ? 'Modifier' : 'Relier'}</button>
       </div>
 
+      <AppRow c={c} />
+
       <Label>Notifs sur ce téléphone</Label>
       <div className="code-row">
         <span className="muted">{pushLine}</span>
         {c.push === 'off' ? <button type="button" className="btn btn-primary btn-sm" onClick={c.enable}><Icon n="bell" s={16} />Activer</button> : null}
       </div>
-      {c.push === 'ios-browser' ? <p className="hint">Sur iPhone : Partager → « Sur l’écran d’accueil », puis ouvre l’appli depuis son icône.</p> : null}
+      {c.push === 'ios-browser' ? <p className="hint">Sur iPhone, installe d’abord l’appli, puis ouvre-la depuis son icône.</p> : null}
 
       {confirm === 'leave'
         ? <button type="button" className="btn btn-stop btn-block" disabled={c.busy} onClick={() => c.act({ type: 'leave' })}>Oui, quitter « {st.name} »</button>
         : <button type="button" className="btn btn-ghost btn-block" onClick={() => setConfirm('leave')}>Quitter la coloc</button>}
       <p className="fine">Tout le monde dans la coloc peut changer ces réglages.</p>
     </Sheet>
+  )
+}
+
+function AppRow({ c }) {
+  const { ins, run } = useInstallAction({ onTuto: () => c.open('install'), flash: c.flash })
+  return (
+    <>
+      <Label>Appli</Label>
+      <div className="code-row">
+        <span className="muted">{ins.installed ? 'Installée sur cet appareil' : 'Pas installée sur cet appareil'}</span>
+        {ins.installed ? null : <button type="button" className="btn btn-ghost btn-sm" onClick={run}><Icon n="download" s={16} />Installer</button>}
+      </div>
+    </>
   )
 }
 

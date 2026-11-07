@@ -10,6 +10,7 @@ et l'onglet Commun : courses et choses à faire, lien Tricount, rappels (poubell
   Pour retrouver son compte sur un autre appareil : code de la coloc, « C'est moi », puis validation depuis un
   appareil déjà connecté (ou par un coloc). On peut déconnecter ses autres appareils dans les réglages.
 - **Notifs** : Web Push (clés VAPID), sans Firebase. Sur iPhone, il faut ajouter l'appli à l'écran d'accueil.
+- **Installation** : sur Android (et Chrome/Edge sur ordi), le bouton « Installer » ouvre la fenêtre d'installation du navigateur ; sur iPhone, il ouvre un tuto adapté au navigateur (`src/Install.jsx`). La session est aussi gardée dans un cookie, car Safari recopie ses cookies (pas le localStorage) dans l'appli installée : on reste connecté après l'installation.
 
 ## Structure
 
