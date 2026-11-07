@@ -55,10 +55,28 @@ export const IKINDS = {
 export const STAGES = ['Idée', 'Écriture', 'Tournage', 'Montage', 'Publiée']
 
 export const WHEN_KEYS = ['soir', 'demain', 'weekend', 'semaine', 'jour']
+export const MAX_AHEAD = 366 // on peut proposer un truc jusqu'à un an à l'avance
+
+/* Listes partagées : courses et choses à faire. */
+export const LISTS = {
+  courses: { label: 'À acheter', empty: 'Rien à acheter. Il manque de la lessive, du PQ ?', ph: 'Ex. : PQ, lessive, huile…' },
+  todo: { label: 'À faire', empty: 'Rien à faire pour l’instant.', ph: 'Ex. : appeler le proprio pour le radiateur' },
+}
+
+/* Appareils, pour « quelqu'un se connecte en tant que toi sur … ». */
+export const DEVICES = {
+  iphone: 'un iPhone', ipad: 'un iPad', android: 'un téléphone Android',
+  mac: 'un Mac', windows: 'un PC Windows', linux: 'un ordi Linux', autre: 'un nouvel appareil',
+}
+
+/* Rappels : jours de la semaine (0 = dimanche), affichés du lundi au dimanche. */
+export const WEEK = [1, 2, 3, 4, 5, 6, 0]
+export const WD_LETTER = ['D', 'L', 'M', 'M', 'J', 'V', 'S']
 
 /* ---------- Dates (jours au format AAAA-MM-JJ, heure locale de la coloc) ---------- */
 const pad = (n) => String(n).padStart(2, '0')
 export const WD = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi']
+export const MO_SHORT = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.']
 export const MO = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre']
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1)
 
@@ -107,7 +125,8 @@ export function dayShort(s, today) {
   if (n === 0) return 'Auj.'
   if (n === 1) return 'Demain'
   const d = parseISO(s)
-  return cap(WD[d.getUTCDay()].slice(0, 3)) + '. ' + d.getUTCDate()
+  // Au-delà d'une semaine, on ajoute le mois (on peut proposer jusqu'à un an à l'avance).
+  return cap(WD[d.getUTCDay()].slice(0, 3)) + '. ' + d.getUTCDate() + (n > 7 ? ' ' + MO_SHORT[d.getUTCMonth()] : '')
 }
 
 /** Transforme un choix « quand » en période {day, until}. */
@@ -155,8 +174,18 @@ export function whenPhrase(e, today) {
   return dayLong(e.day, today).toLowerCase()
 }
 
+/** « le mardi », « le lundi et le jeudi », « tous les jours ». */
+export function daysLabel(days) {
+  const sorted = WEEK.filter((d) => days.includes(d))
+  if (sorted.length === 7) return 'tous les jours'
+  return 'le ' + listNames(sorted.map((d) => WD[d]))
+}
+
 export function listNames(names) {
   if (names.length <= 1) return names.join('')
   return names.slice(0, -1).join(', ') + ' et ' + names[names.length - 1]
 }
 export const plural = (n, w) => n + ' ' + w + (n > 1 ? 's' : '')
+
+/** Adresse d'une photo « à qui est-ce ? ». Les identifiants sont longs et aléatoires : impossibles à deviner. */
+export const photoUrl = (colocId, photoId) => '/api/photo?c=' + colocId + '&p=' + photoId

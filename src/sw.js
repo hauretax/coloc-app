@@ -19,7 +19,9 @@ self.addEventListener('push', (event) => {
   let d = {}
   try { d = event.data ? event.data.json() : {} } catch { d = { title: event.data && event.data.text() } }
   const options = { body: d.body || '', icon: '/icon-192.png', badge: '/badge-96.png', data: { id: d.id } }
-  if (d.tag) { options.tag = d.tag; options.renotify = true }
+  if (d.image) options.image = d.image // photo « à qui est-ce ? » (Android)
+  if (d.tag) { options.tag = d.tag; options.renotify = !d.quiet }
+  if (d.quiet) options.silent = true
   event.waitUntil(Promise.all([self.registration.showNotification(d.title || 'Chez nous', options), tellClients()]))
 })
 

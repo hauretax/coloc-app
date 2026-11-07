@@ -1,12 +1,17 @@
 // Toute la logique de la coloc : chaque action modifie le document de la coloc
 // et prépare les notifications à envoyer. Aucune entrée/sortie ici, tout est testable.
 import {
-  KINDS, WHAT, TYPES, IKINDS, STAGES, WHEN_KEYS, MAX_MEMBERS, MIN_MEMBERS, PALETTE,
-  todayISO, hm, untilLabel, whenRange, whenPhrase, isISO, dayDiff, listNames,
+  KINDS, WHAT, TYPES, IKINDS, STAGES, WHEN_KEYS, MAX_MEMBERS, MIN_MEMBERS, PALETTE, MAX_AHEAD, LISTS, DEVICES,
+  todayISO, hm, untilLabel, whenRange, whenPhrase, isISO, dayDiff, listNames, weekday, photoUrl,
 } from '../shared/rules.js'
 
 const NOTIF_CAP = 30
 const NOISE_MAX_MS = 4 * 3600e3 // une session sans heure de fin s'arrête toute seule après 4 h
+const CLAIM_MS = 10 * 60e3 // une demande de connexion depuis un nouvel appareil vaut 10 min
+const DONE_KEEP_MS = 3 * 864e5 // les courses cochées restent visibles 3 jours
+const SHOPPING_MS = 2 * 3600e3 // « je fais les courses » dure 2 h
+const LOST_MAX_MS = 90 * 864e5 // un objet trouvé jamais réclamé disparaît au bout de 3 mois
+const MAX_TOKENS = 10 // appareils connectés par personne
 
 export class ActionError extends Error {
   constructor(message, status = 400, extra = {}) {
@@ -32,16 +37,31 @@ export function freeColor(doc) {
 }
 
 /** Contexte d'une requête : le document, qui agit, l'heure, et ce qu'il faudra envoyer. */
-export function makeCtx(doc, me, now) {
-  return { doc, me, now, out: [], flash: null, newCode: false }
+export function makeCtx(doc, me, now, tokenHash = null) {
+  return { doc, me, now, tokenHash, out: [], flash: null, newCode: false, dropPhotos: [], indexReminders: false }
 }
 
-function notify(ctx, ids, text, sub = '', actions = [], key = null) {
+/** Met à niveau un document écrit par une version plus ancienne de l'appli. */
+export function upgrade(doc) {
+  if (!doc) return doc
+  for (const m of doc.members) {
+    if (!Array.isArray(m.tokens)) m.tokens = m.tokenHash ? [m.tokenHash] : []
+    delete m.tokenHash
+  }
+  for (const k of ['items', 'reminders', 'lost', 'claims']) if (!Array.isArray(doc[k])) doc[k] = []
+  if (!doc.links || typeof doc.links !== 'object') doc.links = {}
+  if (doc.shopping === undefined) doc.shopping = null
+  return doc
+}
+
+/** extra : { quiet } pour une notif qui remplace la précédente sans sonner, { image } pour une photo,
+    { seen } pour ne pas l'afficher dans l'appli (seulement sur le téléphone). */
+function notify(ctx, ids, text, sub = '', actions = [], key = null, extra = null) {
   const { doc, now } = ctx
   for (const id of ids) {
     if (id === ctx.me) continue
     const list = doc.notifs[id] || (doc.notifs[id] = [])
-    const n = { id: rid('n'), text, sub, actions, key, at: now, seen: false }
+    const n = { id: rid('n'), text, sub, actions, key, at: now, seen: false, ...extra }
     list.push(n)
     if (list.length > NOTIF_CAP) list.splice(0, list.length - NOTIF_CAP)
     ctx.out.push({ to: id, n })
@@ -86,15 +106,98 @@ export function normalize(ctx) {
   const before = doc.events.length
   doc.events = doc.events.filter((e) => dayDiff(e.until, today) > -60)
   if (doc.events.length !== before) changed = true
+  const items = doc.items.filter((i) => !i.done || now - i.done.at < DONE_KEEP_MS)
+  if (items.length !== doc.items.length) { doc.items = items; changed = true }
+  const claims = doc.claims.filter((c) => c.exp > now)
+  if (claims.length !== doc.claims.length) { doc.claims = claims; changed = true }
+  for (const l of [...doc.lost]) {
+    if (now - l.at > LOST_MAX_MS) { dropLost(ctx, l); changed = true } else if (checkLost(ctx, l)) changed = true
+  }
+  if (doc.shopping && now - doc.shopping.at > SHOPPING_MS) {
+    markSeenKey(doc, 'shopping')
+    doc.shopping = null
+    changed = true
+  }
   ctx.me = actor
   return changed
+}
+
+/** Appelé une fois par jour en fin d'après-midi (tâche planifiée) : envoie les rappels du jour. */
+export function remindTick(ctx) {
+  const { doc, now } = ctx
+  const actor = ctx.me
+  ctx.me = null
+  const today = todayISO(now, doc.tz)
+  const wd = weekday(today)
+  let changed = false
+  for (const r of doc.reminders) {
+    if (!r.days.includes(wd) || r.sent === today) continue
+    r.sent = today
+    changed = true
+    if (r.taken && r.taken.day === today) continue
+    const to = activeMembers(doc).map((m) => m.id).filter((id) => doc.status[id]?.kind !== 'away')
+    notify(ctx, to, 'Ce soir : ' + lowerFirst(r.text), 'Qui s’en occupe ?',
+      [{ l: 'Je m’en occupe', a: 'remindTake', v: r.id }, { l: 'Plus tard', a: 'dismiss' }], 'remind:' + r.id)
+  }
+  ctx.me = actor
+  return changed
+}
+
+const lowerFirst = (t) => (/^[A-ZÀ-Ý][a-zà-ÿ]/.test(t) ? t.charAt(0).toLowerCase() + t.slice(1) : t)
+
+/* ---------- Objets trouvés ---------- */
+function dropLost(ctx, l) {
+  ctx.doc.lost = ctx.doc.lost.filter((x) => x.id !== l.id)
+  markSeenKey(ctx.doc, 'lost:' + l.id)
+  ctx.dropPhotos.push(l.photo)
+}
+
+/** Si tout le monde a dit « pas à moi », l'objet sort de la liste et celui qui l'a trouvé est prévenu. */
+function checkLost(ctx, l) {
+  const mem = activeMembers(ctx.doc)
+  if (mem.length < 2 || !mem.every((m) => l.notMine.includes(m.id))) return false
+  dropLost(ctx, l)
+  notify(ctx, [l.by], 'Personne ne réclame ' + (l.note ? '« ' + l.note + ' »' : 'ton objet trouvé'),
+    'Tout le monde a répondu « pas à moi ». Tu peux le donner ou le jeter.')
+  return true
+}
+
+/* ---------- Connexion depuis un nouvel appareil ---------- */
+export function addClaim(ctx, { id, member, secretHash, device }) {
+  const { doc, now } = ctx
+  const m = find(doc.members, member)
+  if (!m || m.gone) throw new ActionError('Cette personne ne fait plus partie de la coloc.', 404)
+  const dev = DEVICES[device] ? device : 'autre'
+  const pending = doc.claims.filter((c) => c.member === member)
+  if (pending.length >= 3) doc.claims = doc.claims.filter((c) => c !== pending[0])
+  doc.claims.push({ id, member, secretHash, device: dev, at: now, exp: now + CLAIM_MS, ok: null, by: null, asked: false })
+  notify(ctx, [member], 'Connexion sur ' + DEVICES[dev] + ' : c’est toi ?',
+    'Quelqu’un veut entrer dans « ' + doc.name + ' » sous ton nom. Si ce n’est pas toi, refuse.',
+    [{ l: 'Oui, c’est moi', a: 'claimOk', v: id }, { l: 'Non', a: 'claimNo', v: id }], 'claim:' + id)
+  return m
+}
+
+/** La personne n'a pas son téléphone : on demande aux autres de valider. */
+export function askOthers(ctx, claim) {
+  if (claim.asked) return
+  claim.asked = true
+  const name = nameOf(ctx.doc, claim.member)
+  notify(ctx, others(ctx.doc, claim.member), name + ' se connecte sur ' + DEVICES[claim.device],
+    name + ' n’a pas son téléphone sous la main. Valide seulement si c’est bien ' + name + '.',
+    [{ l: 'Valider', a: 'claimOk', v: claim.id }, { l: 'Refuser', a: 'claimNo', v: claim.id }], 'claim:' + claim.id)
+}
+
+/** Donne une clé de plus à quelqu'un (un appareil de plus). */
+export function addToken(doc, memberId, tokenHash) {
+  const m = find(doc.members, memberId)
+  m.tokens = m.tokens.concat(tokenHash).slice(-MAX_TOKENS)
 }
 
 function makeEvent(a, today) {
   const when = WHEN_KEYS.includes(a.when) ? a.when : 'soir'
   let day = a.day
-  if (when === 'jour' && !(isISO(day) && dayDiff(day, today) >= 0 && dayDiff(day, today) <= 90)) {
-    throw new ActionError('Choisis un jour dans les trois prochains mois')
+  if (when === 'jour' && !(isISO(day) && dayDiff(day, today) >= 0 && dayDiff(day, today) <= MAX_AHEAD)) {
+    throw new ActionError('Choisis un jour dans l’année qui vient')
   }
   const { day: d, until } = whenRange(when, today, day)
   const t = /^([01]?\d|2[0-3])h([0-5]\d)?$/.test(a.time || '') ? a.time : null
@@ -135,10 +238,11 @@ export function newColoc({ id, code, name, max, tz, now, member }) {
   const color = PALETTE.includes(member.color) ? member.color : PALETTE[0]
   return {
     id, code, name: colocName, max: m, tz: str(tz, 60) || 'Europe/Paris', createdAt: now, version: 0,
-    members: [{ id: member.id, name: validName(member.name), color, tokenHash: member.tokenHash, joinedAt: now }],
+    members: [{ id: member.id, name: validName(member.name), color, tokens: [member.tokenHash], joinedAt: now }],
     status: { [member.id]: { kind: 'home', since: now } },
     door: { closed: false, by: null, at: null },
     noise: null, waiting: [], events: [], ideas: [],
+    items: [], reminders: [], lost: [], claims: [], links: {}, shopping: null,
     notifs: { [member.id]: [] }, push: {},
   }
 }
@@ -146,8 +250,8 @@ export function newColoc({ id, code, name, max, tz, now, member }) {
 export function joinPreview(doc) {
   const mem = activeMembers(doc)
   return {
-    name: doc.name, code: doc.code, max: doc.max, free: doc.max - mem.length,
-    members: mem.map((m) => ({ name: m.name, color: m.color })), color: freeColor(doc),
+    name: doc.name, code: doc.code, max: doc.max, free: Math.max(0, doc.max - mem.length), full: mem.length >= doc.max,
+    members: mem.map((m) => ({ id: m.id, name: m.name, color: m.color })), color: freeColor(doc),
   }
 }
 
@@ -166,7 +270,7 @@ export function addMember(ctx, { id, name, color, tokenHash }) {
   }
   const taken = mem.map((m) => m.color)
   const c = PALETTE.includes(color) && !taken.includes(color) ? color : freeColor(doc)
-  doc.members.push({ id, name: n, color: c, tokenHash, joinedAt: now })
+  doc.members.push({ id, name: n, color: c, tokens: [tokenHash], joinedAt: now })
   doc.status[id] = { kind: 'home', since: now }
   doc.notifs[id] = []
   ctx.me = id
@@ -387,7 +491,7 @@ export function applyAction(ctx, a = {}) {
       const m = find(doc.members, a.id)
       if (!m || m.gone || m.id === me) return
       m.gone = true
-      m.tokenHash = null
+      m.tokens = []
       removeMemberData(doc, m.id)
       ctx.flash = m.name + ' ne fait plus partie de la coloc'
       return
@@ -396,7 +500,7 @@ export function applyAction(ctx, a = {}) {
       const m = find(doc.members, me)
       notify(ctx, others(doc, me), meName + ' a quitté la coloc', 'Une place se libère.', [{ l: 'OK', a: 'dismiss' }])
       m.gone = true
-      m.tokenHash = null
+      m.tokens = []
       removeMemberData(doc, me)
       ctx.left = true
       return
@@ -410,8 +514,8 @@ export function applyAction(ctx, a = {}) {
         throw new ActionError('Abonnement aux notifs invalide')
       }
       const list = (doc.push[me] || []).filter((x) => x.endpoint !== endpoint)
-      list.push({ endpoint, keys: { p256dh: keys.p256dh.slice(0, 200), auth: keys.auth.slice(0, 100) } })
-      doc.push[me] = list.slice(-5)
+      list.push({ endpoint, keys: { p256dh: keys.p256dh.slice(0, 200), auth: keys.auth.slice(0, 100) }, tok: tokTag(ctx) })
+      doc.push[me] = list.slice(-MAX_TOKENS)
       ctx.flash = 'Notifs activées sur ce téléphone'
       return
     }
@@ -419,20 +523,180 @@ export function applyAction(ctx, a = {}) {
       doc.push[me] = (doc.push[me] || []).filter((x) => x.endpoint !== a.endpoint)
       return
 
+    case 'devicesReset': {
+      // Ne garde que l'appareil qui fait la demande (et ses notifs).
+      const m = find(doc.members, me)
+      if (ctx.tokenHash) m.tokens = [ctx.tokenHash]
+      const tok = tokTag(ctx)
+      doc.push[me] = (doc.push[me] || []).filter((x) => tok && x.tok === tok)
+      ctx.flash = 'Tes autres appareils sont déconnectés'
+      return
+    }
+
+    /* ----- Connexion d'un nouvel appareil ----- */
+    case 'claimOk':
+    case 'claimNo': {
+      const cl = find(doc.claims, a.id)
+      if (!cl || cl.exp <= now) throw new ActionError('Cette demande a expiré.')
+      if (cl.member !== me && !cl.asked) throw new ActionError('Seule la personne concernée peut valider.')
+      if (cl.ok !== null) return
+      cl.ok = a.type === 'claimOk'
+      cl.by = me
+      markSeenKey(doc, 'claim:' + cl.id)
+      if (cl.ok && cl.member !== me) {
+        notify(ctx, [cl.member], meName + ' a validé ta connexion sur ' + DEVICES[cl.device],
+          'Si ce n’était pas toi, déconnecte tes autres appareils dans les réglages de la coloc.')
+      }
+      ctx.flash = cl.ok ? 'C’est bon, l’appareil se connecte' : 'Demande refusée'
+      return
+    }
+
+    /* ----- Courses et choses à faire ----- */
+    case 'itemAdd': {
+      const list = LISTS[a.list] ? a.list : 'courses'
+      const text = str(a.text, 80)
+      if (!text) throw new ActionError('Écris ce qu’il faut')
+      if (doc.items.some((i) => i.list === list && !i.done && i.text.toLowerCase() === text.toLowerCase())) {
+        ctx.flash = 'Déjà sur la liste'
+        return
+      }
+      doc.items.push({ id: rid('t'), list, text, by: me, at: now, done: null })
+      if (doc.items.length > 300) doc.items.shift()
+      const sh = doc.shopping
+      if (list === 'courses' && sh && sh.by !== me) notify(ctx, [sh.by], meName + ' ajoute : ' + text, 'Sur la liste des courses.')
+      return
+    }
+    case 'itemDone': {
+      const i = find(doc.items, a.id)
+      if (i) i.done = i.done ? null : { by: me, at: now }
+      return
+    }
+    case 'itemDelete':
+      doc.items = doc.items.filter((x) => x.id !== a.id)
+      return
+    case 'itemClear':
+      doc.items = doc.items.filter((x) => !(x.list === a.list && x.done))
+      return
+    case 'shopping': {
+      if (doc.shopping && doc.shopping.by === me) {
+        markSeenKey(doc, 'shopping')
+        doc.shopping = null
+        ctx.flash = 'Courses terminées'
+        return
+      }
+      doc.shopping = { by: me, at: now }
+      markSeenKey(doc, 'shopping')
+      const to = others(doc, me).filter((id) => doc.status[id]?.kind !== 'away')
+      notify(ctx, to, meName + ' part faire les courses', 'Il te manque un truc ? Ajoute-le à la liste, ' + meName + ' le verra.',
+        [{ l: 'Ajouter un truc', a: 'openCommun' }, { l: 'OK', a: 'dismiss' }], 'shopping')
+      ctx.flash = to.length ? 'Prévenu : ' + names(doc, to) : 'C’est noté'
+      return
+    }
+    case 'colocLink': {
+      const raw = String(a.url ?? '').trim()
+      // On accepte le message de partage entier de Tricount : on y prend le premier lien.
+      let url = (raw.match(/https?:\/\/\S+/i) || [''])[0]
+      if (!url && /^[\w-]+(\.[\w-]+)+\/\S*$/.test(raw)) url = 'https://' + raw
+      url = url.replace(/^http:/i, 'https:').replace(/[)\].,;!?»"']+$/, '').slice(0, 300)
+      if (raw && !url) throw new ActionError('Colle le lien de partage du Tricount (il commence par https://)')
+      doc.links.tricount = url || null
+      ctx.flash = url ? 'Lien du Tricount enregistré' : 'Lien retiré'
+      return
+    }
+
+    /* ----- Rappels (poubelles…) ----- */
+    case 'remindAdd': {
+      const text = str(a.text, 50)
+      if (!text) throw new ActionError('Dis ce qu’il faut faire')
+      const days = [...new Set((Array.isArray(a.days) ? a.days : []).map(Number))].filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+      if (!days.length) throw new ActionError('Choisis au moins un jour')
+      if (doc.reminders.length >= 10) throw new ActionError('10 rappels au maximum')
+      doc.reminders.push({ id: rid('r'), text, days, by: me, at: now, sent: null, taken: null })
+      ctx.indexReminders = true
+      ctx.flash = 'Rappel ajouté'
+      return
+    }
+    case 'remindDelete':
+      doc.reminders = doc.reminders.filter((x) => x.id !== a.id)
+      ctx.flash = 'Rappel supprimé'
+      return
+    case 'remindTake': {
+      const r = find(doc.reminders, a.id)
+      if (!r) throw new ActionError('Ce rappel n’existe plus.')
+      if (r.taken && r.taken.day === today) {
+        if (r.taken.by === me) { r.taken = null; ctx.flash = 'OK, plus personne ne s’en occupe'; return }
+        ctx.flash = nameOf(doc, r.taken.by) + ' s’en occupe déjà'
+        return
+      }
+      r.taken = { by: me, day: today }
+      markSeenKey(doc, 'remind:' + r.id)
+      // Remplace la notif « Ce soir : … » sur les téléphones des autres, sans sonner.
+      notify(ctx, others(doc, me), meName + ' s’en occupe : ' + lowerFirst(r.text), 'Rien à faire pour toi.', [],
+        'remind:' + r.id, { quiet: true, seen: true })
+      ctx.flash = 'Merci ! Les autres le voient'
+      return
+    }
+
+    /* ----- À qui est-ce ? ----- */
+    case 'lostAdd': {
+      const photo = typeof a.photo === 'string' && /^[a-f0-9]{32}$/.test(a.photo) ? a.photo : null
+      if (!photo) throw new ActionError('Il manque la photo')
+      const note = str(a.note, 80)
+      const l = { id: rid('o'), photo, note, by: me, at: now, notMine: [me] }
+      doc.lost.push(l)
+      if (doc.lost.length > 40) dropLost(ctx, doc.lost[0])
+      const to = others(doc, me)
+      notify(ctx, to, meName + ' a trouvé un truc : à qui est-ce ?', note || 'Regarde la photo dans l’appli.',
+        [{ l: 'C’est à moi', a: 'lostMine', v: l.id }, { l: 'Pas à moi', a: 'lostNot', v: l.id }], 'lost:' + l.id,
+        { image: photoUrl(doc.id, photo) })
+      ctx.flash = to.length ? 'Toute la coloc a une notif' : 'Ajouté'
+      return
+    }
+    case 'lostMine': {
+      const l = find(doc.lost, a.id)
+      if (!l) throw new ActionError('Il a déjà été réclamé ou retiré.')
+      dropLost(ctx, l)
+      notify(ctx, [l.by], 'C’est à ' + meName + (l.note ? ' : ' + l.note : ''), 'Plus besoin de chercher.')
+      ctx.flash = l.by === me ? 'Retiré de la liste' : 'Noté, ' + nameOf(doc, l.by) + ' a une notif'
+      return
+    }
+    case 'lostNot': {
+      const l = find(doc.lost, a.id)
+      if (!l) return
+      if (a.undo) l.notMine = l.notMine.filter((x) => x !== me)
+      else if (!l.notMine.includes(me)) l.notMine.push(me)
+      if (checkLost(ctx, l)) ctx.flash = 'Personne ne le réclame, il sort de la liste'
+      return
+    }
+    case 'lostDelete': {
+      const l = find(doc.lost, a.id)
+      if (!l) return
+      if (l.by !== me) throw new ActionError('Seule la personne qui l’a trouvé peut le retirer.')
+      dropLost(ctx, l)
+      ctx.flash = 'Retiré'
+      return
+    }
+
     default:
       throw new ActionError('Action inconnue')
   }
 }
 
+const tokTag = (ctx) => (ctx.tokenHash ? ctx.tokenHash.slice(0, 12) : null)
+
 /** Ce que voit un habitant : sans les clés, sans les abonnements, seulement ses notifs. */
 export function publicState(doc, me, now) {
+  const m = find(doc.members, me)
   return {
     id: doc.id, code: doc.code, name: doc.name, max: doc.max, tz: doc.tz, now, me,
     people: doc.members.map((m) => ({ id: m.id, name: m.name, color: m.color, gone: !!m.gone })),
     status: doc.status, door: doc.door, noise: doc.noise,
     waiting: doc.waiting.includes(me),
     events: doc.events, ideas: doc.ideas,
+    items: doc.items, reminders: doc.reminders, shopping: doc.shopping, links: doc.links,
+    lost: doc.lost.map((l) => ({ ...l, url: photoUrl(doc.id, l.photo) })),
     notifs: (doc.notifs[me] || []).filter((n) => !n.seen).slice(-10),
     pushCount: (doc.push[me] || []).length,
+    devices: m ? m.tokens.length : 0,
   }
 }

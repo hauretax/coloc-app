@@ -1,13 +1,26 @@
 // Écran d'accueil : rejoindre une coloc avec son code, ou en créer une.
-import { useState } from 'react'
+// Déjà dans la coloc ? On choisit son prénom et on valide depuis un appareil déjà connecté.
+import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
-import { Icon, Avs, Label, Stepper, Logo, copyText } from './ui.jsx'
+import { Icon, Av, Avs, Label, Stepper, Logo, copyText } from './ui.jsx'
 import { cleanCode, fmtCode, PALETTE, MAX_MEMBERS, MIN_MEMBERS, plural } from '../shared/rules.js'
 
 const CODE_HINT = 'Pas de 0, O, 1, I, L ni d’autres caractères qui se confondent.'
 
 function codeFromUrl() {
   try { return cleanCode(new URLSearchParams(location.search).get('code') || '').code } catch { return '' }
+}
+
+/** Pour le message « Connexion sur un Mac : c'est toi ? ». */
+function deviceKind() {
+  const ua = navigator.userAgent
+  if (/iPhone|iPod/.test(ua)) return 'iphone'
+  if (/iPad/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) return 'ipad'
+  if (/Android/.test(ua)) return 'android'
+  if (/Mac OS X|Macintosh/.test(ua)) return 'mac'
+  if (/Windows/.test(ua)) return 'windows'
+  if (/Linux/.test(ua)) return 'linux'
+  return 'autre'
 }
 
 function Swatches({ value, onChange, taken = [] }) {
@@ -33,8 +46,33 @@ export default function Onboarding({ msg, onDone }) {
   const [max, setMax] = useState(4)
   const [created, setCreated] = useState(null)
   const [copied, setCopied] = useState(false)
+  const [claim, setClaim] = useState(null)
+  const [claimErr, setClaimErr] = useState('')
+  const doneRef = useRef(onDone)
+  doneRef.current = onDone
 
-  const go = (s) => { setStep(s); setError('') }
+  // En attente de validation : on demande au serveur toutes les 2,5 s si c'est bon.
+  useEffect(() => {
+    if (step !== 'claim' || !claim) return undefined
+    let stop = false
+    let timer = 0
+    const poll = async () => {
+      try {
+        const r = await api.claim({ colocId: claim.colocId, id: claim.id, secret: claim.secret })
+        if (stop) return
+        if (r.session) { doneRef.current(r.session, r.state); return }
+      } catch (e) {
+        if (stop) return
+        if (e.status) { setStep('who'); setClaim(null); setClaimErr(e.message); return }
+        // pas de réseau : on réessaie
+      }
+      timer = setTimeout(poll, 2500)
+    }
+    timer = setTimeout(poll, 2500)
+    return () => { stop = true; clearTimeout(timer) }
+  }, [step, claim])
+
+  const go = (s) => { setStep(s); setError(''); setClaimErr('') }
   const run = async (fn) => {
     setBusy(true)
     setError('')
@@ -52,6 +90,24 @@ export default function Onboarding({ msg, onDone }) {
     if (!name.trim()) throw new Error('Dis-nous ton prénom.')
     const r = await api.join({ code, memberName: name.trim(), color })
     onDone(r.session, r.state)
+  })
+  const startClaim = async (m) => {
+    setBusy(true)
+    setClaimErr('')
+    try {
+      const r = await api.claim({ code, member: m.id, device: deviceKind() })
+      setClaim({ ...r.claim, name: r.name, color: m.color, asked: false })
+      go('claim')
+    } catch (e) {
+      setClaimErr(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const askColoc = () => run(async () => {
+    const r = await api.claim({ colocId: claim.colocId, id: claim.id, secret: claim.secret, ask: true })
+    if (r.session) { onDone(r.session, r.state); return }
+    setClaim((c) => ({ ...c, asked: true }))
   })
   const create = () => run(async () => {
     if (!colocName.trim()) throw new Error('Donne un nom à la coloc.')
@@ -104,6 +160,22 @@ export default function Onboarding({ msg, onDone }) {
     )
   } else if (step === 'who') {
     const taken = preview.members.map((m) => m.color)
+    const again = (
+      <section className="card ob-card">
+        <h3>Déjà dans la coloc ?</h3>
+        <p className="muted">Nouveau téléphone, ordi… Choisis ton prénom, puis valide depuis l’appareil où tu utilises déjà l’appli.</p>
+        <ul className="claim-list">
+          {preview.members.map((m) => (
+            <li key={m.id}>
+              <button type="button" className="claim-row" disabled={busy} onClick={() => startClaim(m)}>
+                <Av p={m} s={34} /><b>{m.name}</b><span>C’est moi</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+        {claimErr ? <p className="code-hint err" role="alert">{claimErr}</p> : null}
+      </section>
+    )
     inner = (
       <>
         {back}
@@ -111,19 +183,55 @@ export default function Onboarding({ msg, onDone }) {
           <p className="ob-eyebrow">Code {fmtCode(preview.code)}</p>
           <h2>Bienvenue chez « {preview.name} »</h2>
           <p className="muted">
-            {plural(preview.members.length, 'habitant')} sur {preview.max} · {plural(preview.free, 'place')} libre{preview.free > 1 ? 's' : ''}
+            {plural(preview.members.length, 'habitant')} sur {preview.max} · {preview.full ? 'complète' : plural(preview.free, 'place') + ' libre' + (preview.free > 1 ? 's' : '')}
           </p>
           <span style={{ '--ring': 'var(--app)' }}><Avs people={preview.members} s={36} /></span>
         </div>
-        <section className="card ob-card">
-          <Label htmlFor="f-name">Ton prénom</Label>
-          <input id="f-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex. : Alex" autoComplete="given-name" maxLength={20}
-            onKeyDown={(e) => { if (e.key === 'Enter') enter() }} />
-          <Label>Ta couleur</Label>
-          <Swatches value={color} onChange={setColor} taken={taken} />
-          {err}
-          <button type="button" className="btn btn-primary btn-block" disabled={busy} onClick={enter}>Entrer dans la coloc</button>
-        </section>
+        {preview.full ? (
+          <>
+            {again}
+            <p className="ob-msg">Plus de place pour quelqu’un de nouveau. Quelqu’un de la coloc peut en ajouter une dans ses réglages.</p>
+          </>
+        ) : (
+          <>
+            <section className="card ob-card">
+              <h3>Première fois ici ?</h3>
+              <Label htmlFor="f-name">Ton prénom</Label>
+              <input id="f-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex. : Alex" autoComplete="given-name" maxLength={20}
+                onKeyDown={(e) => { if (e.key === 'Enter') enter() }} />
+              <Label>Ta couleur</Label>
+              <Swatches value={color} onChange={setColor} taken={taken} />
+              {err}
+              <button type="button" className="btn btn-primary btn-block" disabled={busy} onClick={enter}>Entrer dans la coloc</button>
+            </section>
+            {preview.members.length ? again : null}
+          </>
+        )}
+      </>
+    )
+  } else if (step === 'claim') {
+    inner = (
+      <>
+        <button type="button" className="back" onClick={() => { setClaim(null); go('who') }}><Icon n="back" s={18} />Annuler</button>
+        <div className="ob-head center">
+          <span style={{ '--ring': 'var(--app)' }}><Av p={{ name: claim.name, color: claim.color }} s={64} /></span>
+          <h2>{claim.asked ? 'Demandé à la coloc' : 'Valide sur ton téléphone'}</h2>
+          <p className="muted">
+            {claim.asked
+              ? 'Les autres ont reçu une notif. Dès que quelqu’un valide, tu entres.'
+              : 'Ouvre Chez nous là où tu l’utilises d’habitude : une notif te demande « c’est toi ? ». Appuie sur « Oui, c’est moi ».'}
+          </p>
+          <p className="waiting">En attente</p>
+        </div>
+        {claim.asked ? null : (
+          <section className="card ob-card">
+            <h3>Pas ton téléphone sous la main ?</h3>
+            <p className="muted">Quelqu’un de la coloc peut valider à ta place.</p>
+            <button type="button" className="btn btn-ghost btn-block" disabled={busy} onClick={askColoc}><Icon n="users" s={18} />Demander à la coloc</button>
+          </section>
+        )}
+        {err}
+        <p className="fine">La demande expire au bout de 10 minutes.</p>
       </>
     )
   } else if (step === 'create') {

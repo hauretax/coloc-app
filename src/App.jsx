@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, loadSession, saveSession } from './api.js'
 import { Icon, Av, Avs, Chips, Label, Sheet, Stepper, Logo, copyText } from './ui.jsx'
 import Onboarding from './Onboarding.jsx'
-import { pushStatus, enablePush, resyncPush, isIOS, isStandalone } from './push.js'
+import { pushStatus, enablePush, resyncPush, isStandalone } from './push.js'
 import {
-  KINDS, WHAT, TYPES, IKINDS, STAGES, BUCKETS, MAX_MEMBERS, MIN_MEMBERS,
-  todayISO, hm, untilLabel, bucket, whenShort, dayShort, isoAdd, listNames, plural, fmtCode,
+  KINDS, WHAT, TYPES, IKINDS, STAGES, BUCKETS, MAX_MEMBERS, MIN_MEMBERS, MAX_AHEAD, LISTS, WEEK, WD, WD_LETTER,
+  todayISO, hm, untilLabel, bucket, whenShort, dayShort, isoAdd, listNames, plural, fmtCode, weekday, daysLabel,
 } from '../shared/rules.js'
 
 export default function App() {
@@ -197,13 +197,14 @@ function Coloc({ session, boot, onGone }) {
     session, push, enable,
   }
 
-  const titles = { home: st.name, agenda: 'Agenda', envies: 'Envies' }
+  const titles = { home: st.name, agenda: 'Agenda', envies: 'Envies', commun: 'Commun' }
   const subs = {
     home: new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', timeZone: tz }).format(now),
-    agenda: 'Ce soir, demain, ce week-end…',
+    agenda: 'Ce soir, demain, ce week-end, plus tard…',
     envies: 'Films, idées de sorties, projets vidéo',
+    commun: 'Courses, choses à faire, rappels, objets trouvés',
   }
-  const tabs = [['home', 'Maison', 'home'], ['agenda', 'Agenda', 'cal'], ['envies', 'Envies', 'bulb']]
+  const tabs = [['home', 'Maison', 'home'], ['agenda', 'Agenda', 'cal'], ['envies', 'Envies', 'bulb'], ['commun', 'Commun', 'cart']]
   const meK = KINDS[status(st.me).kind]
 
   return (
@@ -232,14 +233,17 @@ function Coloc({ session, boot, onGone }) {
                 <button type="button" className="icon-btn" onClick={() => c.open('coloc')} aria-label="La coloc : code et habitants"><Icon n="users" s={19} /></button>
                 <button type="button" className="me-btn" onClick={() => c.open('status')} aria-label="Changer mon statut"><Av p={P(st.me)} s={38} /></button>
               </div>
-            ) : (
+            ) : tab === 'commun' ? null : (
               <button type="button" className="btn btn-primary btn-sm" onClick={() => c.open(tab === 'agenda' ? 'addEvent' : 'addIdea', tab === 'envies' && filter !== 'all' ? { kind: filter } : {})}>
                 <Icon n="plus" s={18} />{tab === 'agenda' ? 'Proposer' : 'Ajouter'}
               </button>
             )}
           </header>
           <div className="scroll">
-            {tab === 'home' ? <Home c={c} /> : tab === 'agenda' ? <Agenda c={c} /> : <Envies c={c} filter={filter} setFilter={setFilter} />}
+            {tab === 'home' ? <Home c={c} />
+              : tab === 'agenda' ? <Agenda c={c} />
+                : tab === 'envies' ? <Envies c={c} filter={filter} setFilter={setFilter} />
+                  : <Commun c={c} />}
           </div>
         </div>
       </div>
@@ -259,9 +263,11 @@ function Home({ c }) {
       <div className="col">
         <MyStatus c={c} />
         {away ? <><Door c={c} /><Noise c={c} /></> : <><Noise c={c} /><Door c={c} /></>}
+        <Tonight c={c} />
       </div>
       <div className="col">
         <PushCard c={c} />
+        <LostNudge c={c} />
         <Who c={c} />
         <Soon c={c} />
       </div>
@@ -493,6 +499,38 @@ function Soon({ c }) {
   )
 }
 
+/** Les rappels du jour (poubelles…) : qui s'en occupe ce soir. */
+function Tonight({ c }) {
+  const wd = weekday(c.today)
+  const due = c.st.reminders.filter((r) => r.days.includes(wd))
+  return due.map((r) => {
+    const taken = r.taken && r.taken.day === c.today ? r.taken : null
+    return (
+      <section key={r.id} className={'answer ' + (taken ? 'tone-ok' : 'tone-brass')}>
+        <div className="eyebrow"><Icon n="trash" s={15} /> Ce soir</div>
+        <h3>{r.text}</h3>
+        <p>{taken ? (taken.by === c.me ? 'Tu t’en occupes. Merci !' : c.P(taken.by).name + ' s’en occupe.') : 'Personne ne s’en occupe pour l’instant.'}</p>
+        {taken ? (taken.by === c.me
+          ? <button type="button" className="linkish" disabled={c.busy} onClick={() => c.act({ type: 'remindTake', id: r.id })}>Finalement, je ne peux pas</button>
+          : null)
+          : <div className="actions"><button type="button" className="btn btn-primary" disabled={c.busy} onClick={() => c.act({ type: 'remindTake', id: r.id })}><Icon n="check" s={18} />Je m’en occupe</button></div>}
+      </section>
+    )
+  })
+}
+
+function LostNudge({ c }) {
+  const todo = c.st.lost.filter((l) => l.by !== c.me && !l.notMine.includes(c.me))
+  if (!todo.length) return null
+  return (
+    <button type="button" className="card nudge" onClick={() => c.setTab('commun')}>
+      <img src={todo[todo.length - 1].url} alt="" />
+      <span><b>À qui est-ce ?</b><small>{todo.length > 1 ? todo.length + ' objets attendent ta réponse' : 'Un objet attend ta réponse'}</small></span>
+      <Icon n="next" s={18} />
+    </button>
+  )
+}
+
 /* ---------- Agenda ---------- */
 function Agenda({ c }) {
   const evs = visibleEvents(c)
@@ -615,6 +653,180 @@ function IdeaCard({ c, i }) {
   )
 }
 
+/* ---------- Commun : courses, choses à faire, rappels, à qui est-ce ? ---------- */
+function Commun({ c }) {
+  return (
+    <div className="home">
+      <div className="col"><Lists c={c} /></div>
+      <div className="col"><Reminders c={c} /><Lost c={c} /></div>
+    </div>
+  )
+}
+
+function Lists({ c }) {
+  const { st, me } = c
+  const [list, setList] = useState('courses')
+  const [text, setText] = useState('')
+  const items = st.items.filter((i) => i.list === list)
+  const open = items.filter((i) => !i.done)
+  const done = items.filter((i) => i.done).sort((a, b) => b.done.at - a.done.at)
+  const count = (k) => st.items.filter((i) => i.list === k && !i.done).length
+  const sh = st.shopping
+  const tri = st.links.tricount
+  const add = async (e) => {
+    e.preventDefault()
+    const t = text.trim()
+    if (!t) return
+    setText('')
+    if (!(await c.act({ type: 'itemAdd', list, text: t }))) setText(t)
+  }
+  return (
+    <section className="card list-card">
+      <div className="seg" role="tablist" aria-label="Listes">
+        {Object.entries(LISTS).map(([k, L]) => (
+          <button key={k} type="button" role="tab" aria-selected={list === k} className="seg-b" onClick={() => setList(k)}>
+            {L.label}{count(k) ? <span>{count(k)}</span> : null}
+          </button>
+        ))}
+      </div>
+      {list === 'courses' && sh ? (
+        <p className="shopping-on"><Av p={c.P(sh.by)} s={22} />{sh.by === me ? 'Tu fais les courses : les ajouts t’arrivent en notif.' : c.P(sh.by).name + ' fait les courses : ajoute ce qu’il te faut.'}</p>
+      ) : null}
+      <form className="add-row" onSubmit={add}>
+        <input className="input" value={text} onChange={(e) => setText(e.target.value)} placeholder={LISTS[list].ph} maxLength={80}
+          autoComplete="off" enterKeyHint="done" aria-label={'Ajouter à « ' + LISTS[list].label + ' »'} />
+        <button type="submit" className="btn btn-primary" disabled={!text.trim() || c.busy} aria-label="Ajouter"><Icon n="plus" s={20} /></button>
+      </form>
+      {open.length ? <ul className="items">{open.map((i) => <Item key={i.id} c={c} i={i} />)}</ul> : <p className="muted items-empty">{LISTS[list].empty}</p>}
+      {done.length ? (
+        <>
+          <div className="items-done-h">
+            <span>{list === 'courses' ? 'Acheté' : 'Fait'} · {done.length}</span>
+            <button type="button" className="card-link" onClick={() => c.act({ type: 'itemClear', list })}>Effacer</button>
+          </div>
+          <ul className="items">{done.map((i) => <Item key={i.id} c={c} i={i} />)}</ul>
+        </>
+      ) : null}
+      {list === 'courses' ? (
+        <div className="actions">
+          <button type="button" className={'btn btn-sm ' + (sh && sh.by === me ? 'btn-ink' : 'btn-ghost')} disabled={c.busy || (sh && sh.by !== me)} onClick={() => c.act({ type: 'shopping' })}>
+            <Icon n="cart" s={16} />{sh && sh.by === me ? 'J’ai fini les courses' : 'Je pars faire les courses'}
+          </button>
+          {tri
+            ? <a className="btn btn-ghost btn-sm" href={tri} target="_blank" rel="noopener noreferrer"><Icon n="link" s={16} />Tricount</a>
+            : <button type="button" className="btn btn-ghost btn-sm" onClick={() => c.open('tricount')}><Icon n="link" s={16} />Relier le Tricount</button>}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function Item({ c, i }) {
+  const name = (id) => (id === c.me ? 'toi' : c.P(id).name)
+  const sub = i.done ? (i.list === 'courses' ? 'acheté par ' : 'fait par ') + name(i.done.by) : 'ajouté par ' + name(i.by)
+  return (
+    <li className={'item' + (i.done ? ' is-done' : '')}>
+      <button type="button" className="check" aria-pressed={!!i.done} aria-label={(i.done ? 'Décocher ' : 'Cocher ') + i.text} onClick={() => c.act({ type: 'itemDone', id: i.id })}>
+        <Icon n="check" s={16} />
+      </button>
+      <span className="item-txt"><b>{i.text}</b><small>{sub}</small></span>
+      <button type="button" className="item-x" aria-label={'Retirer ' + i.text} onClick={() => c.act({ type: 'itemDelete', id: i.id })}><Icon n="x" s={15} /></button>
+    </li>
+  )
+}
+
+const evenings = (days) => (days.length === 7 ? 'Tous les soirs' : daysLabel(days).replace(/^le/, 'Le') + ' soir')
+
+function Reminders({ c }) {
+  const [confirm, setConfirm] = useState(null)
+  const wd = weekday(c.today)
+  const list = c.st.reminders
+  return (
+    <section className="card">
+      <div className="card-head"><h4>Rappels</h4><button type="button" className="card-link" onClick={() => c.open('remind')}>Ajouter</button></div>
+      {list.length ? (
+        <ul className="who">
+          {list.map((r) => (
+            <li key={r.id}>
+              <span className="ev-ic sm"><Icon n="trash" s={17} /></span>
+              <div className="who-txt"><b>{r.text}</b><span>{evenings(r.days)}{r.days.includes(wd) ? ' · c’est ce soir' : ''}</span></div>
+              {confirm === r.id
+                ? <button type="button" className="btn btn-stop btn-sm" onClick={() => { setConfirm(null); c.act({ type: 'remindDelete', id: r.id }) }}>Supprimer</button>
+                : <button type="button" className="item-x" aria-label={'Supprimer le rappel ' + r.text} onClick={() => setConfirm(r.id)}><Icon n="x" s={15} /></button>}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted">Les poubelles, le verre… Le bon soir, une notif part en fin de journée avec « Je m’en occupe ».</p>
+      )}
+    </section>
+  )
+}
+
+function Lost({ c }) {
+  const list = c.st.lost.slice().reverse()
+  return (
+    <section className="card">
+      <div className="card-head"><h4>À qui est-ce ?</h4>{list.length ? <span className="muted">{plural(list.length, 'objet')}</span> : null}</div>
+      {list.length ? <div className="lost-list">{list.map((l) => <LostItem key={l.id} c={c} l={l} />)}</div> : (
+        <p className="muted">Un pull, un tupperware, des clés qui traînent ? Prends-les en photo : l’objet reste ici tant que tout le monde n’a pas répondu.</p>
+      )}
+      <button type="button" className="btn btn-ghost btn-sm soon-add" onClick={() => c.open('lost')}><Icon n="photo" s={16} />Prendre une photo</button>
+    </section>
+  )
+}
+
+function LostItem({ c, l }) {
+  const waiting = c.members.filter((p) => !l.notMine.includes(p.id))
+  const answered = l.notMine.includes(c.me)
+  let foot
+  if (l.by === c.me) {
+    foot = <div className="actions"><button type="button" className="btn btn-ghost btn-sm" disabled={c.busy} onClick={() => c.act({ type: 'lostDelete', id: l.id })}>Retirer</button></div>
+  } else if (answered) {
+    foot = <p className="hint">Tu as dit : pas à toi · <button type="button" className="inline-link" onClick={() => c.act({ type: 'lostNot', id: l.id, undo: true })}>annuler</button></p>
+  } else {
+    foot = (
+      <div className="actions">
+        <button type="button" className="btn btn-primary btn-sm" disabled={c.busy} onClick={() => c.act({ type: 'lostMine', id: l.id })}>C’est à moi</button>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={c.busy} onClick={() => c.act({ type: 'lostNot', id: l.id })}>Pas à moi</button>
+      </div>
+    )
+  }
+  return (
+    <article className="lost">
+      <button type="button" className="lost-img" onClick={() => c.open('photo', { id: l.id })} aria-label="Voir la photo en grand">
+        <img src={l.url} alt={l.note || 'Objet trouvé'} loading="lazy" />
+      </button>
+      <div className="lost-body">
+        <b>{l.note || 'Objet trouvé'}</b>
+        <span className="muted">Par {l.by === c.me ? 'toi' : c.P(l.by).name} · {c.sinceLabel(l.at)}</span>
+        {waiting.length ? <span className="lost-wait"><span className="muted">Pas encore répondu</span><Avs people={waiting} s={22} /></span> : null}
+        {foot}
+      </div>
+    </article>
+  )
+}
+
+/** Réduit la photo (1280 px, JPEG) avant l'envoi : quelques centaines de Ko au lieu de plusieurs Mo. */
+async function shrinkPhoto(file) {
+  const url = URL.createObjectURL(file)
+  try {
+    const img = await new Promise((ok, ko) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ko; i.src = url })
+    let size = 1280
+    for (let q = 0.8; ; q -= 0.15, size = Math.round(size * 0.8)) {
+      const k = Math.min(1, size / Math.max(img.naturalWidth, img.naturalHeight))
+      const cv = document.createElement('canvas')
+      cv.width = Math.round(img.naturalWidth * k)
+      cv.height = Math.round(img.naturalHeight * k)
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height)
+      const data = cv.toDataURL('image/jpeg', q)
+      if (data.length < 1_300_000 || q < 0.4) return data
+    }
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
 /* ---------- Notification dans l'appli ---------- */
 function PushBanner({ c }) {
   const list = c.st.notifs
@@ -630,6 +842,12 @@ function PushBanner({ c }) {
       case 'noiseTen': c.act({ type: 'noiseTen', seenId }); break
       case 'goDown': c.act({ type: 'goDown', who: a.v, seenId }); break
       case 'going': c.act({ type: 'eventGoing', id: a.v, yes: true, seenId }); break
+      case 'claimOk': c.act({ type: 'claimOk', id: a.v, seenId }); break
+      case 'claimNo': c.act({ type: 'claimNo', id: a.v, seenId }); break
+      case 'remindTake': c.act({ type: 'remindTake', id: a.v, seenId }); break
+      case 'lostMine': c.act({ type: 'lostMine', id: a.v, seenId }); break
+      case 'lostNot': c.act({ type: 'lostNot', id: a.v, seenId }); break
+      case 'openCommun': c.act({ type: 'seen', seenId }); c.setTab('commun'); break
       default: c.act({ type: 'seen', seenId })
     }
   }
@@ -643,6 +861,7 @@ function PushBanner({ c }) {
       </div>
       <b className="push-t">{n.text}</b>
       {n.sub ? <p>{n.sub}</p> : null}
+      {n.image ? <img className="push-img" src={n.image} alt="" /> : null}
       {n.actions.length ? (
         <div className="push-actions">
           {n.actions.map((a, i) => <button key={i} type="button" className={'btn btn-sm ' + (i === 0 ? 'btn-primary' : 'btn-ghost')} onClick={() => run(a)}>{a.l}</button>)}
@@ -663,6 +882,10 @@ function Sheets({ c, sheet }) {
     case 'addIdea': return <IdeaSheet {...props} />
     case 'addEvent': return <EventSheet {...props} />
     case 'plan': return <PlanSheet {...props} />
+    case 'remind': return <RemindSheet {...props} />
+    case 'lost': return <LostSheet {...props} />
+    case 'photo': return <PhotoSheet {...props} />
+    case 'tricount': return <TricountSheet {...props} />
     default: return null
   }
 }
@@ -736,15 +959,28 @@ function ComplainSheet({ c, done }) {
   )
 }
 
+/** Le jour choisi (ou null si « autre date » sans date). */
+const pickedDay = (w, today) => (w.when !== 'jour' ? null : w.other ? w.day : w.day || isoAdd(today, 2))
+
 function WhenFields({ value, onChange, today }) {
-  const days = Array.from({ length: 12 }, (_, k) => isoAdd(today, k + 2))
+  const days = Array.from({ length: 6 }, (_, k) => isoAdd(today, k + 2))
+  const set = (patch) => onChange({ ...value, ...patch })
   return (
     <>
       <Label>Quand ?</Label>
-      <Chips value={value.when} onChange={(when) => onChange({ ...value, when })} options={WHEN_OPTS} />
+      <Chips value={value.when} onChange={(when) => set({ when })} options={WHEN_OPTS} />
       {value.when === 'jour' ? <>
         <Label>Quel jour ?</Label>
-        <Chips value={value.day || days[0]} onChange={(day) => onChange({ ...value, day })} options={days.map((d) => ({ v: d, l: dayShort(d, today) }))} />
+        <div className="chips">
+          {days.map((d) => (
+            <button key={d} type="button" className="chip" aria-pressed={!value.other && (value.day || days[0]) === d} onClick={() => set({ day: d, other: false })}>{dayShort(d, today)}</button>
+          ))}
+          <button type="button" className="chip" aria-pressed={!!value.other} onClick={() => set({ other: true, day: value.other ? value.day : null })}><Icon n="cal" s={15} />Autre date</button>
+        </div>
+        {value.other ? (
+          <input type="date" className="input date-input" aria-label="Date" value={value.day || ''} min={today} max={isoAdd(today, MAX_AHEAD)}
+            onChange={(e) => set({ day: e.target.value || null })} />
+        ) : null}
       </> : null}
       <Label>Heure (si besoin)</Label>
       <Chips value={value.time} onChange={(time) => onChange({ ...value, time })} options={TIME_OPTS} />
@@ -759,7 +995,9 @@ function EventSheet({ c, sheet, done }) {
   const [when, setWhen] = useState({ when: sheet.when || 'soir', day: null, time: '' })
   const save = () => {
     if (!title.trim()) { c.flash('Dis ce que tu proposes'); return }
-    done({ type: 'eventAdd', etype, title, note, when: when.when, day: when.day || isoAdd(c.today, 2), time: when.time })
+    const day = pickedDay(when, c.today)
+    if (when.when === 'jour' && !day) { c.flash('Choisis la date'); return }
+    done({ type: 'eventAdd', etype, title, note, when: when.when, day, time: when.time })
   }
   return (
     <Sheet title="Proposer un truc" onClose={c.close}>
@@ -786,7 +1024,11 @@ function PlanSheet({ c, sheet, done }) {
     <Sheet title={verb + ' « ' + i.title + ' » quand ?'} onClose={c.close}>
       <WhenFields value={when} onChange={setWhen} today={c.today} />
       <button type="button" className="btn btn-primary btn-block" disabled={c.busy}
-        onClick={() => done({ type: 'ideaPlan', id: i.id, when: when.when, day: when.day || isoAdd(c.today, 2), time: when.time })}>
+        onClick={() => {
+          const day = pickedDay(when, c.today)
+          if (when.when === 'jour' && !day) { c.flash('Choisis la date'); return }
+          done({ type: 'ideaPlan', id: i.id, when: when.when, day, time: when.time })
+        }}>
         <Icon n="cal" s={18} />Proposer à la coloc
       </button>
       <p className="fine">Ça passe dans l’agenda avec un bouton « Je viens ».</p>
@@ -855,6 +1097,21 @@ function ColocSheet({ c }) {
         ))}
       </ul>
 
+      <Label>Tes appareils</Label>
+      <div className="code-row">
+        <span className="muted">{st.devices > 1 ? 'Ton compte est ouvert sur ' + st.devices + ' appareils' : 'Ton compte est ouvert seulement ici'}</span>
+        {st.devices > 1 ? (confirm === 'devices'
+          ? <button type="button" className="btn btn-stop btn-sm" disabled={c.busy} onClick={() => { setConfirm(null); c.act({ type: 'devicesReset' }) }}>Oui, déconnecter</button>
+          : <button type="button" className="btn btn-ghost btn-sm" onClick={() => setConfirm('devices')}>Déconnecter les autres</button>) : null}
+      </div>
+      <p className="hint">Sur un ordi ou un nouveau téléphone : ouvre l’appli, tape le code de la coloc, puis « C’est moi ».</p>
+
+      <Label>Tricount</Label>
+      <div className="code-row">
+        <span className="muted">{st.links.tricount ? 'Relié, bouton dans Commun' : 'Pas encore relié'}</span>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => c.open('tricount')}><Icon n="link" s={16} />{st.links.tricount ? 'Modifier' : 'Relier'}</button>
+      </div>
+
       <Label>Notifs sur ce téléphone</Label>
       <div className="code-row">
         <span className="muted">{pushLine}</span>
@@ -866,6 +1123,97 @@ function ColocSheet({ c }) {
         ? <button type="button" className="btn btn-stop btn-block" disabled={c.busy} onClick={() => c.act({ type: 'leave' })}>Oui, quitter « {st.name} »</button>
         : <button type="button" className="btn btn-ghost btn-block" onClick={() => setConfirm('leave')}>Quitter la coloc</button>}
       <p className="fine">Tout le monde dans la coloc peut changer ces réglages.</p>
+    </Sheet>
+  )
+}
+
+function RemindSheet({ c, done }) {
+  const [text, setText] = useState('')
+  const [days, setDays] = useState([])
+  const flip = (d) => setDays((ds) => (ds.includes(d) ? ds.filter((x) => x !== d) : ds.concat(d)))
+  const save = () => {
+    if (!text.trim()) { c.flash('Dis ce qu’il faut faire'); return }
+    if (!days.length) { c.flash('Choisis au moins un soir'); return }
+    done({ type: 'remindAdd', text, days })
+  }
+  return (
+    <Sheet title="Nouveau rappel" onClose={c.close}>
+      <Label htmlFor="f-rem">Quoi ?</Label>
+      <input id="f-rem" className="input" value={text} onChange={(e) => setText(e.target.value)} placeholder="Ex. : Poubelles jaunes" autoComplete="off" maxLength={50} />
+      <div className="chips sugg">
+        {['Poubelles', 'Poubelles jaunes', 'Verre', 'Compost'].map((t) => (
+          <button key={t} type="button" className="chip" aria-pressed={text === t} onClick={() => setText(t)}>{t}</button>
+        ))}
+      </div>
+      <Label>Quel soir ?</Label>
+      <div className="days" role="group" aria-label="Soirs de la semaine">
+        {WEEK.map((d) => <button key={d} type="button" className="day-b" aria-pressed={days.includes(d)} aria-label={WD[d]} onClick={() => flip(d)}>{WD_LETTER[d]}</button>)}
+      </div>
+      <p className="hint days-h">{days.length ? evenings(days) + '. ' : ''}En général, la veille du ramassage.</p>
+      <button type="button" className="btn btn-primary btn-block" disabled={c.busy} onClick={save}>Ajouter le rappel</button>
+      <p className="fine">Ce soir-là, une notif part en fin de journée avec « Je m’en occupe ». Ceux qui sont en voyage ne la reçoivent pas.</p>
+    </Sheet>
+  )
+}
+
+function LostSheet({ c }) {
+  const [photo, setPhoto] = useState(null)
+  const [note, setNote] = useState('')
+  const [sending, setSending] = useState(false)
+  const pick = async (e) => {
+    const f = e.target.files && e.target.files[0]
+    e.target.value = ''
+    if (!f) return
+    try { setPhoto(await shrinkPhoto(f)) } catch { c.flash('Photo illisible, essaie avec une autre') }
+  }
+  const send = async () => {
+    if (!photo) return
+    setSending(true)
+    try {
+      const { id } = await api.photo(c.session, photo)
+      if (await c.act({ type: 'lostAdd', photo: id, note })) c.close()
+    } catch (e) {
+      c.flash(e.message)
+    } finally {
+      setSending(false)
+    }
+  }
+  return (
+    <Sheet title="À qui est-ce ?" onClose={c.close}>
+      <label className={'photo-pick' + (photo ? ' has' : '')}>
+        <input type="file" accept="image/*" onChange={pick} aria-label="Prendre ou choisir une photo" />
+        {photo ? <img src={photo} alt="Aperçu" /> : <span><Icon n="photo" s={30} />Prendre ou choisir une photo</span>}
+      </label>
+      {photo ? <p className="hint center-t">Touche la photo pour en prendre une autre.</p> : null}
+      <Label htmlFor="f-lost">C’est quoi ? (facultatif)</Label>
+      <input id="f-lost" className="input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ex. : pull bleu, sur le canapé" autoComplete="off" maxLength={80} />
+      <button type="button" className="btn btn-primary btn-block" disabled={!photo || sending} onClick={send}>{sending ? 'Envoi…' : 'Demander à la coloc'}</button>
+      <p className="fine">Chacun répond « c’est à moi » ou « pas à moi ». L’objet reste dans la liste tant que tout le monde n’a pas répondu.</p>
+    </Sheet>
+  )
+}
+
+function PhotoSheet({ c, sheet }) {
+  const l = c.st.lost.find((x) => x.id === sheet.id)
+  if (!l) return null
+  return (
+    <Sheet title={l.note || 'À qui est-ce ?'} onClose={c.close}>
+      <img className="photo-full" src={l.url} alt={l.note || 'Objet trouvé'} />
+    </Sheet>
+  )
+}
+
+function TricountSheet({ c, done }) {
+  const [url, setUrl] = useState(c.st.links.tricount || '')
+  return (
+    <Sheet title="Relier le Tricount" onClose={c.close}>
+      <p className="muted">Dans Tricount, ouvre celui de la coloc et copie son lien d’invitation. Colle-le ici, même avec le message autour.</p>
+      <Label htmlFor="f-tri">Lien du Tricount</Label>
+      <input id="f-tri" className="input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://tricount.com/…" autoComplete="off" inputMode="url"
+        onKeyDown={(e) => { if (e.key === 'Enter') done({ type: 'colocLink', url }) }} />
+      <button type="button" className="btn btn-primary btn-block" disabled={c.busy || !url.trim()} onClick={() => done({ type: 'colocLink', url })}>Enregistrer</button>
+      {c.st.links.tricount ? <button type="button" className="linkish tone-stop" onClick={() => done({ type: 'colocLink', url: '' })}>Retirer le lien</button> : null}
+      <p className="fine">Un bouton « Tricount » apparaît à côté des courses, pour noter qui a payé quoi.</p>
     </Sheet>
   )
 }

@@ -17,7 +17,7 @@ export function getApi(env = process.env) {
     console.warn('[chez-nous] pas de Redis configuré : stockage en mémoire (perdu au redémarrage)')
   }
   const store = url && token ? redisStore(url, token) : memoryStore()
-  api = makeApi({ store, push: makePush(env) })
+  api = makeApi({ store, push: makePush(env), cronSecret: env.CRON_SECRET || null })
   return api
 }
 
@@ -31,8 +31,21 @@ export function vercel(route) {
     if (typeof body === 'string') {
       try { body = JSON.parse(body) } catch { body = {} }
     }
-    const out = await getApi()(route, { method: req.method, body: body || {}, headers: req.headers, ip: clientIp(req.headers) })
-    res.setHeader('Cache-Control', 'no-store')
-    res.status(out.status).json(out.json)
+    const out = await getApi()(route, { method: req.method, body: body || {}, query: req.query || {}, headers: req.headers, ip: clientIp(req.headers) })
+    send(res, out)
   }
+}
+
+/** Écrit la réponse : JSON (par défaut, jamais en cache) ou binaire (photos). */
+export function send(res, out) {
+  if (out.body) {
+    for (const [k, v] of Object.entries(out.headers || {})) res.setHeader(k, v)
+    res.statusCode = out.status
+    res.end(out.body)
+    return
+  }
+  res.setHeader('Cache-Control', 'no-store')
+  res.setHeader('Content-Type', 'application/json; charset=utf-8')
+  res.statusCode = out.status
+  res.end(JSON.stringify(out.json))
 }

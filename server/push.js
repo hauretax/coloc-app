@@ -17,7 +17,7 @@ export function makePush(env) {
       const jobs = []
       for (const { to, n } of out) {
         for (const sub of doc.push?.[to] || []) {
-          const payload = JSON.stringify({ title: n.text, body: n.sub || '', tag: n.key || n.id, id: n.id })
+          const payload = JSON.stringify({ title: n.text, body: n.sub || '', tag: n.key || n.id, id: n.id, quiet: !!n.quiet, image: n.image || null })
           jobs.push(
             webpush.sendNotification(sub, payload, { TTL: 6 * 3600, urgency: 'high', timeout: 5000 }).catch((err) => {
               if (err && (err.statusCode === 404 || err.statusCode === 410)) gone.push({ to, endpoint: sub.endpoint })

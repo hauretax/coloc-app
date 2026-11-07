@@ -5,6 +5,7 @@ import { Redis } from '@upstash/redis'
 export function memoryStore() {
   const docs = new Map()
   const kv = new Map()
+  const sets = new Map()
   return {
     kind: 'memory',
     async get(id) {
@@ -27,6 +28,15 @@ export function memoryStore() {
       return true
     },
     async codeDel(code) { kv.delete('code:' + code) },
+    async photoPut(key, b64) { kv.set('photo:' + key, b64) },
+    async photoGet(key) { return kv.get('photo:' + key) || null },
+    async photoDel(key) { kv.delete('photo:' + key) },
+    async indexAdd(set, id) {
+      if (!sets.has(set)) sets.set(set, new Set())
+      sets.get(set).add(id)
+    },
+    async indexAll(set) { return [...(sets.get(set) || [])] },
+    async indexDel(set, id) { sets.get(set)?.delete(id) },
     async hit(key, ttlSec) {
       const k = 'rate:' + key
       const now = Date.now()
@@ -67,6 +77,14 @@ export function redisStore(url, token) {
     async codeGet(code) { return (await r.get('code:' + code)) || null },
     async codeClaim(code, id) { return (await r.set('code:' + code, id, { nx: true })) === 'OK' },
     async codeDel(code) { await r.del('code:' + code) },
+    // Photos « à qui est-ce ? » : en base64, avec une durée de vie (supprimées plus tôt si l'objet est réclamé).
+    async photoPut(key, b64, ttlSec) { await r.set('photo:' + key, b64, { ex: ttlSec }) },
+    async photoGet(key) { return (await r.get('photo:' + key)) || null },
+    async photoDel(key) { await r.del('photo:' + key) },
+    // Index des colocs qui ont des rappels, parcouru par la tâche du soir.
+    async indexAdd(set, id) { await r.sadd('index:' + set, id) },
+    async indexAll(set) { return (await r.smembers('index:' + set)) || [] },
+    async indexDel(set, id) { await r.srem('index:' + set, id) },
     async hit(key, ttlSec) {
       const k = 'rate:' + key
       const n = await r.incr(k)

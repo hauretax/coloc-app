@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { makeApi } from '../server/handlers.js'
 import { memoryStore } from '../server/store.js'
-import { cleanCode, ALPHABET, whenRange, bucket, untilLabel } from '../shared/rules.js'
+import { cleanCode, ALPHABET, whenRange, bucket, untilLabel, dayShort, isoAdd } from '../shared/rules.js'
 
 // Samedi 7 novembre 2026, 16h20 à Paris
 const T0 = Date.parse('2026-11-07T15:20:00Z')
@@ -12,9 +12,10 @@ function setup() {
   const sent = []
   const push = {
     publicKey: 'test-key',
-    async send(doc, out) { for (const o of out) sent.push({ to: o.to, text: o.n.text }); return [] },
+    async send(doc, out) { for (const o of out) sent.push({ to: o.to, text: o.n.text, image: o.n.image, quiet: o.n.quiet }); return [] },
   }
-  const api = makeApi({ store: memoryStore(), push, clock: () => now })
+  const store = memoryStore()
+  const api = makeApi({ store, push, clock: () => now, cronSecret: 'sekret' })
   const auth = (s) => ({ authorization: `Bearer ${s.colocId}.${s.memberId}.${s.token}` })
   const call = async (route, body, session, method = 'POST') => {
     const r = await api(route, { method, body, headers: session ? auth(session) : {}, ip: '1.2.3.4' })
@@ -25,7 +26,8 @@ function setup() {
     assert.equal(r.status, 200, JSON.stringify(r.json))
     return r.json
   }
-  return { api, call, act, sent, tick: (ms) => { now += ms } }
+  const get = async (session) => (await call('state', {}, session, 'GET')).json.state
+  return { api, store, call, act, get, sent, tick: (ms) => { now += ms } }
 }
 
 async function coloc(t, n = 3, max = 4) {
@@ -70,8 +72,11 @@ test('rejoindre : aperçu, prénom déjà pris, coloc complète, code inconnu', 
   assert.equal(dup.status, 409)
   assert.equal((await t.call('join', { code, memberName: 'Inès' })).status, 200)
   const full = await t.call('join', { code })
-  assert.equal(full.status, 409)
-  assert.match(full.json.error, /complète \(4 sur 4\)/)
+  assert.equal(full.status, 200, 'l’aperçu reste visible pour pouvoir se reconnecter')
+  assert.equal(full.json.coloc.full, true)
+  const fifth = await t.call('join', { code, memberName: 'Max' })
+  assert.equal(fifth.status, 409)
+  assert.match(fifth.json.error, /complète \(4 sur 4\)/)
   assert.equal((await t.call('join', { code: 'AAAAAA' })).status, 404)
   // l'arrivée est notifiée aux autres
   assert.ok(t.sent.some((s) => s.text === 'Inès a rejoint la coloc'))
@@ -160,7 +165,7 @@ test('propositions : ce soir sans heure, je viens, envies programmées', async (
 test('réglages : places, nouveau code, quitter', async () => {
   const t = setup()
   const { people, code } = await coloc(t, 3, 3)
-  assert.equal((await t.call('join', { code })).status, 409)
+  assert.equal((await t.call('join', { code, memberName: 'Max' })).status, 409)
   const up = await t.act(people.huggo, { type: 'colocMax', delta: 1 })
   assert.equal(up.state.max, 4)
   const down = await t.act(people.huggo, { type: 'colocMax', delta: -1 })
@@ -183,4 +188,166 @@ test('dates : week-end, prochains jours, heures de fin', () => {
   assert.equal(bucket({ when: 'jour', day: '2026-11-20', until: '2026-11-20' }, '2026-11-07'), 'tard')
   assert.equal(untilLabel(Date.parse('2026-11-07T16:00:00Z'), T0, 'Europe/Paris'), '17h')
   assert.equal(untilLabel(Date.parse('2026-11-08T08:00:00Z'), T0, 'Europe/Paris'), 'demain 9h')
+})
+
+test('nouvel appareil : demander, valider sur son téléphone, se connecter', async () => {
+  const t = setup()
+  const { code, people } = await coloc(t, 3)
+  const preview = (await t.call('join', { code })).json.coloc
+  const lea = preview.members.find((m) => m.name === 'Léa')
+  const start = await t.call('claim', { code, member: lea.id, device: 'mac' })
+  assert.equal(start.status, 200, JSON.stringify(start.json))
+  assert.equal(start.json.name, 'Léa')
+  const claim = start.json.claim
+  assert.ok(t.sent.some((s) => s.to === lea.id && s.text === 'Connexion sur un Mac : c’est toi ?'))
+  assert.deepEqual((await t.call('claim', claim)).json, { pending: true, asked: false })
+  // Sam ne peut pas valider tant que Léa n'a pas demandé de l'aide
+  assert.equal((await t.call('action', { type: 'claimOk', id: claim.id }, people.Sam)).status, 400)
+  const n = (await t.get(people['Léa'])).notifs.at(-1)
+  await t.act(people['Léa'], { type: 'claimOk', id: n.actions[0].v, seenId: n.id })
+  const done = await t.call('claim', claim)
+  assert.equal(done.status, 200, JSON.stringify(done.json))
+  const pc = done.json.session
+  assert.equal(pc.memberId, lea.id)
+  assert.equal(done.json.state.devices, 2)
+  // les deux appareils marchent, la demande ne sert qu'une fois
+  assert.equal((await t.call('state', {}, pc, 'GET')).status, 200)
+  assert.equal((await t.call('state', {}, people['Léa'], 'GET')).status, 200)
+  assert.equal((await t.call('claim', claim)).status, 410)
+  // déconnecter les autres appareils depuis l'ordi
+  const reset = await t.act(pc, { type: 'devicesReset' })
+  assert.equal(reset.state.devices, 1)
+  assert.equal((await t.call('state', {}, people['Léa'], 'GET')).status, 401)
+})
+
+test('nouvel appareil sans son téléphone : un coloc valide, ou refuse', async () => {
+  const t = setup()
+  const { code, people } = await coloc(t, 3)
+  const sam = (await t.call('join', { code })).json.coloc.members.find((m) => m.name === 'Sam')
+  const claim = (await t.call('claim', { code, member: sam.id, device: 'android' })).json.claim
+  const asked = await t.call('claim', { ...claim, ask: true })
+  assert.deepEqual(asked.json, { pending: true, asked: true })
+  assert.ok(t.sent.some((s) => s.text === 'Sam se connecte sur un téléphone Android'))
+  await t.act(people.huggo, { type: 'claimOk', id: claim.id })
+  assert.ok(t.sent.some((s) => s.to === sam.id && s.text === 'Huggo a validé ta connexion sur un téléphone Android'))
+  assert.equal((await t.call('claim', claim)).status, 200)
+  const again = (await t.call('claim', { code, member: sam.id, device: 'iphone' })).json.claim
+  await t.act(people.Sam, { type: 'claimNo', id: again.id })
+  assert.equal((await t.call('claim', again)).status, 403)
+  const late = (await t.call('claim', { code, member: sam.id })).json.claim
+  t.tick(11 * 60e3)
+  assert.equal((await t.call('claim', late)).status, 410)
+})
+
+test('une coloc créée avant les appareils multiples marche toujours', async () => {
+  const t = setup()
+  const { people } = await coloc(t, 2)
+  const id = people.huggo.colocId
+  const doc = await t.store.get(id)
+  for (const m of doc.members) { m.tokenHash = m.tokens[0]; delete m.tokens }
+  for (const k of ['items', 'reminders', 'lost', 'claims', 'links', 'shopping']) delete doc[k]
+  assert.ok(await t.store.cas(id, doc, doc.version))
+  const st = await t.get(people.huggo)
+  assert.deepEqual([st.items, st.lost, st.devices], [[], [], 1])
+  await t.act(people['Léa'], { type: 'itemAdd', list: 'courses', text: 'PQ' })
+  const saved = await t.store.get(id)
+  assert.ok(saved.members.every((m) => Array.isArray(m.tokens) && !('tokenHash' in m)))
+})
+
+test('agenda : on peut proposer un truc dans plusieurs mois', async () => {
+  const t = setup()
+  const { people } = await coloc(t, 2)
+  const r = await t.act(people.huggo, { type: 'eventAdd', title: 'Nouvel an', when: 'jour', day: '2026-12-31' })
+  assert.equal(r.state.events[0].day, '2026-12-31')
+  assert.equal((await t.act(people.huggo, { type: 'eventAdd', title: 'Été', when: 'jour', day: '2027-07-14' })).state.events.length, 2)
+  assert.equal((await t.call('action', { type: 'eventAdd', title: 'Trop loin', when: 'jour', day: '2028-01-01' }, people.huggo)).status, 400)
+  assert.equal(dayShort('2026-12-31', '2026-11-07'), 'Jeu. 31 déc.')
+  assert.equal(dayShort('2026-11-10', '2026-11-07'), 'Mar. 10')
+})
+
+test('courses : liste, je pars faire les courses, ajout prévenu, cochés effacés', async () => {
+  const t = setup()
+  const { people } = await coloc(t, 3)
+  await t.act(people['Léa'], { type: 'itemAdd', list: 'courses', text: 'Lessive' })
+  const dup = await t.act(people.Sam, { type: 'itemAdd', list: 'courses', text: 'lessive' })
+  assert.equal(dup.flash, 'Déjà sur la liste')
+  await t.act(people.Sam, { type: 'itemAdd', list: 'todo', text: 'Appeler le proprio' })
+  const go = await t.act(people.huggo, { type: 'shopping' })
+  assert.match(go.flash, /Léa et Sam/)
+  assert.ok(t.sent.some((s) => s.text === 'Huggo part faire les courses'))
+  await t.act(people.Sam, { type: 'itemAdd', list: 'courses', text: 'PQ' })
+  assert.ok(t.sent.some((s) => s.text === 'Sam ajoute : PQ'))
+  const st = await t.get(people.huggo)
+  assert.equal(st.items.length, 3)
+  const lessive = st.items.find((i) => i.text === 'Lessive')
+  const done = await t.act(people.huggo, { type: 'itemDone', id: lessive.id })
+  assert.equal(done.state.items.find((i) => i.id === lessive.id).done.by, people.huggo.memberId)
+  t.tick(3 * 864e5 + 1000)
+  const later = await t.get(people.huggo)
+  assert.deepEqual(later.items.map((i) => i.text), ['Appeler le proprio', 'PQ'])
+  assert.equal(later.shopping, null)
+})
+
+test('tricount : on garde le lien, même collé avec le message de partage', async () => {
+  const t = setup()
+  const { people } = await coloc(t, 2)
+  const r = await t.act(people.huggo, { type: 'colocLink', url: 'Rejoins le tricount « Coloc » : https://tricount.com/aBcD123xyz.' })
+  assert.equal(r.state.links.tricount, 'https://tricount.com/aBcD123xyz')
+  assert.equal((await t.act(people.huggo, { type: 'colocLink', url: 'tricount.com/aBc' })).state.links.tricount, 'https://tricount.com/aBc')
+  assert.equal((await t.call('action', { type: 'colocLink', url: 'pas un lien' }, people.huggo)).status, 400)
+  assert.equal((await t.act(people.huggo, { type: 'colocLink', url: '' })).state.links.tricount, null)
+})
+
+test('rappels : la tâche du soir prévient le bon jour, une seule fois, et « je m’en occupe »', async () => {
+  const t = setup()
+  const { people } = await coloc(t, 3)
+  // T0 est un samedi (6). Poubelles le samedi et le mardi.
+  const r = await t.act(people['Léa'], { type: 'remindAdd', text: 'Poubelles jaunes', days: [6, 2] })
+  const rem = r.state.reminders[0]
+  assert.equal((await t.call('cron', {}, null, 'GET')).status, 401)
+  const cron = () => t.api('cron', { method: 'GET', headers: { authorization: 'Bearer sekret' } })
+  const first = await cron()
+  assert.deepEqual(first.json, { colocs: 1, sent: 3 })
+  assert.ok(t.sent.some((s) => s.text === 'Ce soir : poubelles jaunes'))
+  assert.equal((await cron()).json.sent, 0, 'pas deux fois le même soir')
+  await t.act(people.Sam, { type: 'remindTake', id: rem.id })
+  const quiet = t.sent.filter((s) => s.text === 'Sam s’en occupe : poubelles jaunes')
+  assert.equal(quiet.length, 2)
+  assert.ok(quiet.every((s) => s.quiet))
+  const huggo = await t.get(people.huggo)
+  assert.equal(huggo.reminders[0].taken.by, people.Sam.memberId)
+  assert.ok(!huggo.notifs.some((n) => n.key === 'remind:' + rem.id), 'la notif du soir disparaît dans l’appli')
+  t.tick(864e5) // dimanche : rien
+  assert.equal((await cron()).json.sent, 0)
+  t.tick(2 * 864e5) // mardi
+  assert.equal((await cron()).json.sent, 3)
+})
+
+test('à qui est-ce ? : photo, pas à moi, personne ne le réclame', async () => {
+  const t = setup()
+  const { people } = await coloc(t, 3)
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4, 5, 6]).toString('base64')
+  assert.equal((await t.call('photo', { data: 'aGVsbG8=' }, people.huggo)).status, 400)
+  const up = await t.call('photo', { data: 'data:image/jpeg;base64,' + jpeg }, people.huggo)
+  assert.equal(up.status, 200)
+  const shown = await t.api('photo', { method: 'GET', query: { c: people.huggo.colocId, p: up.json.id } })
+  assert.equal(shown.status, 200)
+  assert.equal(shown.body[0], 0xff)
+  const add = await t.act(people.huggo, { type: 'lostAdd', photo: up.json.id, note: 'Pull bleu' })
+  const item = add.state.lost[0]
+  assert.equal(item.url, '/api/photo?c=' + people.huggo.colocId + '&p=' + up.json.id)
+  const notif = t.sent.find((s) => s.text === 'Huggo a trouvé un truc : à qui est-ce ?')
+  assert.equal(notif.image, item.url)
+  await t.act(people['Léa'], { type: 'lostNot', id: item.id })
+  assert.equal((await t.get(people.huggo)).lost.length, 1, 'Sam n’a pas encore répondu')
+  const last = await t.act(people.Sam, { type: 'lostNot', id: item.id })
+  assert.equal(last.state.lost.length, 0)
+  assert.ok(t.sent.some((s) => s.to === people.huggo.memberId && s.text === 'Personne ne réclame « Pull bleu »'))
+  assert.equal((await t.api('photo', { method: 'GET', query: { c: people.huggo.colocId, p: up.json.id } })).status, 404, 'photo effacée')
+  // « c'est à moi »
+  const up2 = (await t.call('photo', { data: jpeg }, people.Sam)).json.id
+  const it2 = (await t.act(people.Sam, { type: 'lostAdd', photo: up2 })).state.lost[0]
+  const mine = await t.act(people['Léa'], { type: 'lostMine', id: it2.id })
+  assert.equal(mine.state.lost.length, 0)
+  assert.ok(t.sent.some((s) => s.to === people.Sam.memberId && s.text === 'C’est à Léa'))
 })

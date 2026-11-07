@@ -9,16 +9,16 @@ function devApi() {
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         if (!req.url.startsWith('/api/')) return next()
-        const route = req.url.slice(5).split('?')[0]
+        const url = new URL(req.url, 'http://local')
+        const route = url.pathname.slice(5)
         let raw = ''
         for await (const chunk of req) raw += chunk
         let body = {}
         try { body = raw ? JSON.parse(raw) : {} } catch { body = {} }
-        const { getApi, clientIp } = await import('./server/app.js')
-        const out = await getApi()(route, { method: req.method, body, headers: req.headers, ip: clientIp(req.headers) })
-        res.statusCode = out.status
-        res.setHeader('Content-Type', 'application/json')
-        res.end(JSON.stringify(out.json))
+        const { getApi, clientIp, send } = await import('./server/app.js')
+        const query = Object.fromEntries(url.searchParams)
+        const out = await getApi()(route, { method: req.method, body, query, headers: req.headers, ip: clientIp(req.headers) })
+        send(res, out)
       })
     },
   }
