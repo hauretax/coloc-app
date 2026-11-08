@@ -71,7 +71,8 @@ async function call(path, { method = 'GET', body, session } = {}) {
 export const api = {
   create: (body) => call('create', { method: 'POST', body }),
   join: (body) => call('join', { method: 'POST', body }),
-  state: (session) => call('state', { session }),
+  /** v : la version déjà affichée ; le serveur répond { same: true } si rien n'a changé. */
+  state: (session, v) => call('state' + (v === null || v === undefined ? '' : '?v=' + encodeURIComponent(v)), { session }),
   action: (session, body) => call('action', { method: 'POST', body, session }),
   vapid: () => call('vapid'),
   claim: (body) => call('claim', { method: 'POST', body }),

@@ -4,6 +4,7 @@ import { Icon, Av, Avs, Chips, Label, Sheet, Stepper, Logo, copyText } from './u
 import Onboarding from './Onboarding.jsx'
 import { InstallCard, InstallSheet, useInstallAction } from './Install.jsx'
 import { Plantes, PlantNudge, PlantSheet, PlantForm } from './Plants.jsx'
+import { Chat, TalkChip, TalkLast, unreadCount } from './Chat.jsx'
 import { shrinkPhoto } from './photo.js'
 import { pushStatus, enablePush, resyncPush } from './push.js'
 import {
@@ -82,7 +83,9 @@ function outBackOptions(now, tz) {
 function Coloc({ session, boot, onGone }) {
   const [st, setSt] = useState(boot)
   const [loadErr, setLoadErr] = useState('')
-  const [tab, setTab] = useState('home')
+  // ?open=chat : on a touché une notif du chat alors que l'appli était fermée
+  const [tab, setTab] = useState(() => { try { return new URLSearchParams(location.search).get('open') === 'chat' ? 'chat' : 'home' } catch { return 'home' } })
+  const [draft, setDraft] = useState({ text: '', ref: null })
   const [filter, setFilter] = useState('all')
   const [sheet, setSheet] = useState(null)
   const [flash, setFlash] = useState(null)
@@ -101,23 +104,28 @@ function Coloc({ session, boot, onGone }) {
     return false
   }, [onGone])
 
+  // Une réponse plus ancienne (deux requêtes croisées) ne remplace pas un état plus récent.
+  const apply = useCallback((ns) => setSt((prev) => (!prev || (ns.version || 0) >= (prev.version || 0) ? ns : prev)), [])
+  const ver = useRef(null)
+  ver.current = st ? st.version : null
+
   const refresh = useCallback(async () => {
     try {
-      const r = await api.state(session)
-      setSt(r.state)
+      const r = await api.state(session, ver.current)
+      if (!r.same) apply(r.state)
       setNow(Date.now())
       setLoadErr('')
     } catch (e) {
       if (!handleErr(e)) setLoadErr(e.message)
     }
-  }, [session, handleErr])
+  }, [session, handleErr, apply])
 
   const act = useCallback(async (a) => {
     setBusy(true)
     try {
       const r = await api.action(session, a)
       if (r.left) { onGone(r.message); return null }
-      setSt(r.state)
+      apply(r.state)
       setNow(Date.now())
       if (r.flash) showFlash(r.flash)
       return r
@@ -127,13 +135,25 @@ function Coloc({ session, boot, onGone }) {
     } finally {
       setBusy(false)
     }
-  }, [session, handleErr, onGone, showFlash])
+  }, [session, handleErr, onGone, showFlash, apply])
+  /** En arrière-plan (« lu » dans le chat) : sans bloquer les boutons ni afficher de message. */
+  const quiet = useCallback(async (a) => {
+    try {
+      const r = await api.action(session, a)
+      if (r && r.state) apply(r.state)
+    } catch (e) {
+      handleErr(e)
+    }
+  }, [session, handleErr, apply])
 
   useEffect(() => {
     if (!boot) refresh()
     const tick = () => { if (document.visibilityState === 'visible') refresh() }
     const id = setInterval(tick, 12000)
-    const onMsg = (e) => { if (e.data && e.data.type === 'refresh') refresh() }
+    const onMsg = (e) => {
+      if (e.data && e.data.type === 'refresh') refresh()
+      if (e.data && e.data.type === 'open' && e.data.v === 'chat') { setSheet(null); setTab('chat') }
+    }
     document.addEventListener('visibilitychange', tick)
     window.addEventListener('focus', tick)
     navigator.serviceWorker?.addEventListener('message', onMsg)
@@ -146,6 +166,15 @@ function Coloc({ session, boot, onGone }) {
   }, [refresh, boot])
 
   useEffect(() => { pushStatus().then(setPush) }, [])
+  useEffect(() => { try { if (/[?&]open=/.test(location.search)) history.replaceState(null, '', '/') } catch { /* rien */ } }, [])
+  // Pastille sur l'icône de l'appli : messages du chat pas encore lus
+  const unread = st ? unreadCount(st) : 0
+  useEffect(() => {
+    try {
+      const p = unread ? navigator.setAppBadge?.(unread) : navigator.clearAppBadge?.()
+      if (p && p.catch) p.catch(() => {})
+    } catch { /* pas de pastille sur ce navigateur */ }
+  }, [unread])
   const pushCount = st ? st.pushCount : 1
   useEffect(() => {
     if (st) resyncPush(session, pushCount).then((r) => { if (r && r.state) setSt(r.state) }).catch(() => {})
@@ -197,18 +226,21 @@ function Coloc({ session, boot, onGone }) {
   const c = {
     st, me: st.me, P, members, status, detail, act, busy, today, now, tz, sinceLabel,
     open: (type, extra) => setSheet({ type, ...extra }), close: () => setSheet(null), setTab, flash: showFlash,
-    session, push, enable, refresh,
+    session, push, enable, refresh, quiet, draft, setDraft,
+    /** « En parler » : ouvre le chat avec l'élément ajouté au message. */
+    talk: (t, id) => { setDraft((d) => ({ ...d, ref: { t, id } })); setSheet(null); setTab('chat') },
   }
 
-  const titles = { home: st.name, agenda: 'Agenda', envies: 'Envies', commun: 'Commun', plantes: 'Plantes' }
+  const titles = { home: st.name, chat: 'Chat', agenda: 'Agenda', envies: 'Envies', commun: 'Commun', plantes: 'Plantes' }
   const subs = {
     home: new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', timeZone: tz }).format(now),
+    chat: listNames(members.map((p) => (p.id === st.me ? 'toi' : p.name))),
     agenda: 'Ce soir, demain, ce week-end, plus tard…',
     envies: 'Films, idées de sorties, projets vidéo',
     commun: 'Courses, choses à faire, rappels, objets trouvés',
     plantes: 'Quand arroser, où les mettre, qui s’en occupe',
   }
-  const tabs = [['home', 'Maison', 'home'], ['agenda', 'Agenda', 'cal'], ['envies', 'Envies', 'bulb'], ['commun', 'Commun', 'cart'], ['plantes', 'Plantes', 'leaf']]
+  const tabs = [['home', 'Maison', 'home'], ['chat', 'Chat', 'chat'], ['agenda', 'Agenda', 'cal'], ['envies', 'Envies', 'bulb'], ['commun', 'Commun', 'cart'], ['plantes', 'Plantes', 'leaf']]
   const meK = KINDS[status(st.me).kind]
 
   return (
@@ -217,8 +249,9 @@ function Coloc({ session, boot, onGone }) {
         <nav className="nav" aria-label="Sections">
           <div className="nav-brand"><Logo s={17} />Chez nous</div>
           {tabs.map(([k, l, i]) => (
-            <button key={k} type="button" className="tab" aria-current={tab === k ? 'page' : undefined} onClick={() => setTab(k)}>
-              <span className="tab-ic"><Icon n={i} s={22} /></span><span>{l}</span>
+            <button key={k} type="button" className="tab" aria-current={tab === k ? 'page' : undefined} onClick={() => setTab(k)}
+              aria-label={k === 'chat' && unread && tab !== 'chat' ? l + ', ' + plural(unread, 'message') + ' non lu' + (unread > 1 ? 's' : '') : undefined}>
+              <span className="tab-ic"><Icon n={i} s={22} />{k === 'chat' && unread && tab !== 'chat' ? <span className="tab-badge">{unread > 9 ? '9+' : unread}</span> : null}</span><span>{l}</span>
             </button>
           ))}
           <button type="button" className="nav-me" onClick={() => c.open('status')}>
@@ -237,7 +270,7 @@ function Coloc({ session, boot, onGone }) {
                 <button type="button" className="icon-btn" onClick={() => c.open('coloc')} aria-label="La coloc : code et habitants"><Icon n="users" s={19} /></button>
                 <button type="button" className="me-btn" onClick={() => c.open('status')} aria-label="Changer mon statut"><Av p={P(st.me)} s={38} /></button>
               </div>
-            ) : tab === 'commun' ? null : tab === 'plantes' ? (
+            ) : tab === 'commun' || tab === 'chat' ? null : tab === 'plantes' ? (
               <button type="button" className="btn btn-primary btn-sm" onClick={() => c.open('plantForm')}><Icon n="plus" s={18} />Ajouter</button>
             ) : (
               <button type="button" className="btn btn-primary btn-sm" onClick={() => c.open(tab === 'agenda' ? 'addEvent' : 'addIdea', tab === 'envies' && filter !== 'all' ? { kind: filter } : {})}>
@@ -245,13 +278,15 @@ function Coloc({ session, boot, onGone }) {
               </button>
             )}
           </header>
-          <div className="scroll">
-            {tab === 'home' ? <Home c={c} />
-              : tab === 'agenda' ? <Agenda c={c} />
-                : tab === 'envies' ? <Envies c={c} filter={filter} setFilter={setFilter} />
-                  : tab === 'plantes' ? <Plantes c={c} />
-                    : <Commun c={c} />}
-          </div>
+          {tab === 'chat' ? <Chat c={c} /> : (
+            <div className="scroll">
+              {tab === 'home' ? <Home c={c} />
+                : tab === 'agenda' ? <Agenda c={c} />
+                  : tab === 'envies' ? <Envies c={c} filter={filter} setFilter={setFilter} />
+                    : tab === 'plantes' ? <Plantes c={c} />
+                      : <Commun c={c} />}
+            </div>
+          )}
         </div>
       </div>
       <PushBanner c={c} />
@@ -591,10 +626,12 @@ function EventCard({ c, e }) {
         <span className="muted">{goingText(e.going.length)}</span>
         <span className="grow" />
         {e.by === c.me ? <button type="button" className="inline-link" onClick={() => c.act({ type: 'eventDelete', id: e.id })}>Retirer</button> : null}
+        <TalkChip c={c} t="event" id={e.id} name={e.title} />
         <button type="button" className="chip" aria-pressed={mine} disabled={c.busy} onClick={() => c.act({ type: 'eventGoing', id: e.id })}>
           {mine ? <Icon n="check" s={15} /> : null}Je viens
         </button>
       </div>
+      <TalkLast c={c} t="event" id={e.id} />
     </article>
   )
 }
@@ -658,12 +695,14 @@ function IdeaCard({ c, i }) {
         <button type="button" className="plus" aria-pressed={plussed} aria-label={'Moi aussi, ' + i.plus.length + ' au total'} onClick={() => c.act({ type: 'ideaPlus', id: i.id })}>+1 <b>{i.plus.length}</b></button>
         <Avs people={i.plus.map(c.P)} s={24} />
         <span className="grow" />
+        <TalkChip c={c} t="idea" id={i.id} name={i.title} />
         {ev ? (
           <button type="button" className="planned" onClick={() => c.setTab('agenda')}><Icon n="cal" s={15} />{whenShort(ev, c.today)}{ev.time ? ' · ' + ev.time : ''}</button>
         ) : (
           <button type="button" className="btn btn-ghost btn-sm" onClick={() => c.open('plan', { idea: i.id })}>Proposer</button>
         )}
       </div>
+      <TalkLast c={c} t="idea" id={i.id} />
     </article>
   )
 }
@@ -745,8 +784,20 @@ function Item({ c, i }) {
         <Icon n="check" s={16} />
       </button>
       <span className="item-txt"><b>{i.text}</b><small>{sub}</small></span>
+      <ItemTalk c={c} i={i} />
       <button type="button" className="item-x" aria-label={'Retirer ' + i.text} onClick={() => c.act({ type: 'itemDelete', id: i.id })}><Icon n="x" s={15} /></button>
     </li>
+  )
+}
+
+/** Sur une ligne de liste : juste l'icône (et le nombre de messages). */
+function ItemTalk({ c, i }) {
+  const n = c.st.chat.filter((m) => m.ref && m.ref.t === 'item' && m.ref.id === i.id).length
+  return (
+    <button type="button" className="item-x item-talk" onClick={() => c.talk('item', i.id)}
+      aria-label={'En parler dans le chat : ' + i.text + (n ? ', ' + plural(n, 'message') : '')}>
+      <Icon n="chat" s={16} />{n ? <span>{n}</span> : null}
+    </button>
   )
 }
 
@@ -791,22 +842,31 @@ function Lost({ c }) {
   )
 }
 
-function LostItem({ c, l }) {
-  const waiting = c.members.filter((p) => !l.notMine.includes(p.id))
-  const answered = l.notMine.includes(c.me)
-  let foot
+/** Répondre à « à qui est-ce ? » : c'est à moi, pas à moi, ou en parler dans le chat. */
+function LostActions({ c, l }) {
+  const talk = <TalkChip c={c} t="lost" id={l.id} name={l.note || 'Objet trouvé'} />
   if (l.by === c.me) {
-    foot = <div className="actions"><button type="button" className="btn btn-ghost btn-sm" disabled={c.busy} onClick={() => c.act({ type: 'lostDelete', id: l.id })}>Retirer</button></div>
-  } else if (answered) {
-    foot = <p className="hint">Tu as dit : pas à toi · <button type="button" className="inline-link" onClick={() => c.act({ type: 'lostNot', id: l.id, undo: true })}>annuler</button></p>
-  } else {
-    foot = (
-      <div className="actions">
-        <button type="button" className="btn btn-primary btn-sm" disabled={c.busy} onClick={() => c.act({ type: 'lostMine', id: l.id })}>C’est à moi</button>
-        <button type="button" className="btn btn-ghost btn-sm" disabled={c.busy} onClick={() => c.act({ type: 'lostNot', id: l.id })}>Pas à moi</button>
-      </div>
+    return <div className="actions"><button type="button" className="btn btn-ghost btn-sm" disabled={c.busy} onClick={() => c.act({ type: 'lostDelete', id: l.id })}>Retirer</button>{talk}</div>
+  }
+  if (l.notMine.includes(c.me)) {
+    return (
+      <>
+        <p className="hint">Tu as dit : pas à toi · <button type="button" className="inline-link" onClick={() => c.act({ type: 'lostNot', id: l.id, undo: true })}>annuler</button></p>
+        <div className="actions">{talk}</div>
+      </>
     )
   }
+  return (
+    <div className="actions">
+      <button type="button" className="btn btn-primary btn-sm" disabled={c.busy} onClick={() => c.act({ type: 'lostMine', id: l.id })}>C’est à moi</button>
+      <button type="button" className="btn btn-ghost btn-sm" disabled={c.busy} onClick={() => c.act({ type: 'lostNot', id: l.id })}>Pas à moi</button>
+      {talk}
+    </div>
+  )
+}
+
+function LostItem({ c, l }) {
+  const waiting = c.members.filter((p) => !l.notMine.includes(p.id))
   return (
     <article className="lost">
       <button type="button" className="lost-img" onClick={() => c.open('photo', { id: l.id })} aria-label="Voir la photo en grand">
@@ -816,7 +876,8 @@ function LostItem({ c, l }) {
         <b>{l.note || 'Objet trouvé'}</b>
         <span className="muted">Par {l.by === c.me ? 'toi' : c.P(l.by).name} · {c.sinceLabel(l.at)}</span>
         {waiting.length ? <span className="lost-wait"><span className="muted">Pas encore répondu</span><Avs people={waiting} s={22} /></span> : null}
-        {foot}
+        <TalkLast c={c} t="lost" id={l.id} />
+        <LostActions c={c} l={l} />
       </div>
     </article>
   )
@@ -1267,12 +1328,16 @@ function LostSheet({ c }) {
   )
 }
 
+/** Photo en grand : un objet trouvé encore dans la liste (avec ses réponses), ou une photo vue dans le chat. */
 function PhotoSheet({ c, sheet }) {
-  const l = c.st.lost.find((x) => x.id === sheet.id)
-  if (!l) return null
+  const l = sheet.id ? c.st.lost.find((x) => x.id === sheet.id) : null
+  const url = l ? l.url : sheet.url
+  if (!url) return null
+  const title = l ? l.note || 'À qui est-ce ?' : sheet.title || 'Photo'
   return (
-    <Sheet title={l.note || 'À qui est-ce ?'} onClose={c.close}>
-      <img className="photo-full" src={l.url} alt={l.note || 'Objet trouvé'} />
+    <Sheet title={title} onClose={c.close}>
+      <img className="photo-full" src={url} alt={title} />
+      {l ? <div className="photo-acts"><TalkLast c={c} t="lost" id={l.id} /><LostActions c={c} l={l} /></div> : <p className="hint center-t">L’objet n’est plus dans la liste « À qui est-ce ? ».</p>}
     </Sheet>
   )
 }

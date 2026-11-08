@@ -18,18 +18,26 @@ async function tellClients() {
 self.addEventListener('push', (event) => {
   let d = {}
   try { d = event.data ? event.data.json() : {} } catch { d = { title: event.data && event.data.text() } }
-  const options = { body: d.body || '', icon: '/icon-192.png', badge: '/badge-96.png', data: { id: d.id } }
+  const options = { body: d.body || '', icon: '/icon-192.png', badge: '/badge-96.png', data: { id: d.id, open: d.open || null } }
   if (d.image) options.image = d.image // photo « à qui est-ce ? » (Android)
   if (d.tag) { options.tag = d.tag; options.renotify = !d.quiet }
   if (d.quiet) options.silent = true
-  event.waitUntil(Promise.all([self.registration.showNotification(d.title || 'Chez nous', options), tellClients()]))
+  const jobs = [self.registration.showNotification(d.title || 'Chez nous', options), tellClients()]
+  // Messages du chat non lus : pastille sur l'icône de l'appli (là où c'est possible)
+  if (typeof d.badge === 'number' && self.navigator.setAppBadge) jobs.push(self.navigator.setAppBadge(d.badge).catch(() => {}))
+  event.waitUntil(Promise.all(jobs))
 })
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
+  const open = event.notification.data && event.notification.data.open
   event.waitUntil((async () => {
     const list = await tellClients()
-    for (const c of list) if ('focus' in c) return c.focus()
-    return self.clients.openWindow('/')
+    for (const c of list) {
+      if (!('focus' in c)) continue
+      if (open) c.postMessage({ type: 'open', v: open })
+      return c.focus()
+    }
+    return self.clients.openWindow(open ? '/?open=' + open : '/')
   })())
 })

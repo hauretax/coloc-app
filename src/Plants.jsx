@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { api } from './api.js'
 import { Icon, Av, Chips, Label, Sheet } from './ui.jsx'
 import { shrinkPhoto } from './photo.js'
+import { TalkChip, TalkLast } from './Chat.jsx'
 import { WD, MO, MO_SHORT, todayISO, dayDiff, dayShort, parseISO, listNames, plural } from '../shared/rules.js'
 import { PLANTS, LIGHT, HUM, FEEDS, LOGS, HOW, SIGNS, ROOMS, isRest, plantDue, feedDue, feedLabel } from '../shared/plants.js'
 
@@ -265,7 +266,9 @@ export function PlantSheet({ c, sheet }) {
       ) : <p className="muted">Rien de noté pour l’instant.</p>}
       {avg ? <p className="hint days-h">En moyenne, arrosée tous les {avg} jours.</p> : null}
 
-      <div className="actions plant-foot">
+      <div className="plant-foot"><TalkLast c={c} t="plant" id={p.id} /></div>
+      <div className="actions">
+        <TalkChip c={c} t="plant" id={p.id} name={p.name} />
         <button type="button" className="btn btn-ghost btn-sm" onClick={() => c.open('plantForm', { id: p.id })}><Icon n="edit" s={16} />Modifier</button>
         {confirm
           ? <button type="button" className="btn btn-stop btn-sm" disabled={c.busy} onClick={() => { c.close(); c.act({ type: 'plantDelete', id: p.id }) }}>Oui, retirer {p.name}</button>

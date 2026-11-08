@@ -13,7 +13,7 @@ function setup() {
   const sent = []
   const push = {
     publicKey: 'test-key',
-    async send(doc, out) { for (const o of out) sent.push({ to: o.to, text: o.n.text, image: o.n.image, quiet: o.n.quiet }); return [] },
+    async send(doc, out) { for (const o of out) sent.push({ to: o.to, text: o.n.text, sub: o.n.sub, image: o.n.image, quiet: o.n.quiet, badge: o.n.badge, key: o.n.key }); return [] },
   }
   const store = memoryStore(() => now)
   const api = makeApi({ store, push, clock: () => now, cronSecret: 'sekret' })
@@ -513,4 +513,107 @@ test('plantes : la tâche du soir prévient qui s’en occupe, une fois, puis to
   for (const id of [mon.id, bas.id, pot.id]) await t.act(people.huggo, { type: 'plantDelete', id })
   assert.deepEqual((await cron()).json, { colocs: 1, sent: 0 })
   assert.deepEqual((await cron()).json, { colocs: 0, sent: 0 })
+})
+
+test('chat : message, élément cité, notifs regroupées, lu', async () => {
+  const t = setup()
+  const { people } = await coloc(t, 3)
+  const lea = people['Léa']
+  const sam = people.Sam
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]).toString('base64')
+  const ph = (await t.call('photo', { data: jpeg }, lea)).json.id
+  const keys = (await t.act(lea, { type: 'lostAdd', photo: ph, note: 'Clés' })).state.lost[0]
+  t.sent.length = 0
+  t.tick(60e3)
+
+  // Message vide, élément inconnu
+  assert.equal((await t.call('action', { type: 'chatSend', text: '   ' }, people.huggo)).status, 400)
+  const bad = await t.call('action', { type: 'chatSend', text: 'hein', ref: { t: 'lost', id: 'o_nope' } }, people.huggo)
+  assert.equal(bad.status, 400)
+  assert.match(bad.json.error, /plus dans la liste/)
+  assert.equal((await t.call('action', { type: 'chatSend', text: 'x', ref: { t: '__proto__', id: 'a' } }, people.huggo)).status, 400)
+
+  // Huggo répond à « à qui est-ce ? » dans le chat
+  const r = await t.act(people.huggo, { type: 'chatSend', text: '  C’est la clé de la boîte aux lettres\r\n\n\n\nelle était dans l’entrée ', ref: { t: 'lost', id: keys.id } })
+  const m = r.state.chat[0]
+  assert.equal(m.text, 'C’est la clé de la boîte aux lettres\n\nelle était dans l’entrée')
+  assert.deepEqual([m.ref.t, m.ref.id, m.ref.title, m.ref.url], ['lost', keys.id, 'Clés', keys.url])
+  assert.equal(r.state.chatRead, m.at, 'ses propres messages sont lus')
+  assert.equal(t.sent.length, 2, 'Léa et Sam')
+  const toLea = t.sent.find((x) => x.to === lea.memberId)
+  assert.deepEqual([toLea.text, toLea.key, toLea.badge, toLea.image, toLea.quiet], ['Huggo · « Clés »', 'chat', 1, keys.url, false])
+  assert.match(toLea.sub, /^C’est la clé de la boîte aux lettres/)
+  const leaState = await t.get(lea)
+  assert.ok(!leaState.notifs.some((n) => n.key === 'chat'), 'pas de bannière dans l’appli pour le chat')
+  assert.equal(leaState.chat.filter((x) => x.by !== lea.memberId && x.at > leaState.chatRead).length, 1, 'non lu pour Léa')
+
+  // Deuxième message : la notif dit « 2 nouveaux messages » à qui n'a pas lu, et ne sonne pas pour qui est dans le chat
+  t.tick(5000)
+  await t.act(lea, { type: 'chatRead', at: m.at })
+  t.tick(10000)
+  t.sent.length = 0
+  await t.act(people.huggo, { type: 'chatSend', text: 'Je la mets sur le meuble' })
+  const toSam = t.sent.find((x) => x.to === sam.memberId)
+  assert.deepEqual([toSam.text, toSam.sub, toSam.badge, toSam.quiet], ['2 nouveaux messages', 'Huggo : Je la mets sur le meuble', 2, false])
+  const toLea2 = t.sent.find((x) => x.to === lea.memberId)
+  assert.deepEqual([toLea2.text, toLea2.badge, toLea2.quiet], ['Huggo', 1, true])
+
+  // Lu : plus rien de non lu ; une date dans le futur est ramenée à maintenant
+  const read = await t.act(sam, { type: 'chatRead', at: Date.now() + 9e12 })
+  assert.equal(read.state.chat.filter((x) => x.by !== sam.memberId && x.at > read.state.chatRead).length, 0)
+  assert.ok(read.state.chatRead <= T0 + 120e3)
+
+  // Retirer : seulement ses messages
+  const second = read.state.chat[1]
+  assert.equal((await t.call('action', { type: 'chatDelete', id: second.id }, sam)).status, 400)
+  assert.equal((await t.act(people.huggo, { type: 'chatDelete', id: second.id })).state.chat.length, 1)
+
+  // L'objet est réclamé : il sort de la liste, mais sa photo reste visible dans le chat (elle expirera)
+  const expired = []
+  t.store.photoExpire = async (k, ttl) => { expired.push([k, ttl]) }
+  await t.act(lea, { type: 'lostMine', id: keys.id })
+  assert.deepEqual(expired, [[lea.colocId + ':' + ph, 120 * 86400]])
+  assert.equal((await t.api('photo', { method: 'GET', query: { c: lea.colocId, p: ph } })).status, 200)
+  const after = await t.get(sam)
+  assert.equal(after.lost.length, 0)
+  assert.equal(after.chat[0].ref.url, keys.url)
+
+  // Une plante, une course, une soirée, une envie
+  const pl = (await t.act(sam, { type: 'plantAdd', sp: 'pothos' })).state.plants[0]
+  const it = (await t.act(sam, { type: 'itemAdd', list: 'courses', text: 'Lait' })).state.items[0]
+  const ev = (await t.act(sam, { type: 'eventAdd', etype: 'film', title: 'Dune', when: 'soir' })).state.events[0]
+  const idea = (await t.act(sam, { type: 'ideaAdd', kind: 'video', title: 'Clip' })).state.ideas[0]
+  for (const [ref, title] of [[{ t: 'plant', id: pl.id }, 'Pothos'], [{ t: 'item', id: it.id }, 'Lait'], [{ t: 'event', id: ev.id }, 'Dune'], [{ t: 'idea', id: idea.id }, 'Clip']]) {
+    const res = await t.act(lea, { type: 'chatSend', text: 'ok', ref })
+    assert.equal(res.state.chat[res.state.chat.length - 1].ref.title, title)
+  }
+  const last = (await t.get(lea)).chat
+  assert.equal(last[last.length - 3].ref.list, 'courses')
+  assert.equal(last[last.length - 1].ref.kind, 'video')
+
+  // Le chat garde les 200 derniers messages
+  for (let i = 0; i < 205; i++) await t.act(sam, { type: 'chatSend', text: 'm' + i })
+  const full = await t.get(sam)
+  assert.equal(full.chat.length, 200)
+  assert.equal(full.chat[199].text, 'm204')
+
+  // Quelqu'un qui arrive voit l'historique, sans 200 messages « non lus »
+  const max = await t.call('join', { code: (await t.get(sam)).code, memberName: 'Max' })
+  const mx = max.json.state
+  assert.equal(mx.chat.length, 200)
+  assert.equal(mx.chat.filter((x) => x.at > mx.chatRead).length, 0)
+})
+
+test('état : rien de changé depuis la version affichée, réponse vide', async () => {
+  const t = setup()
+  const { people } = await coloc(t, 2)
+  const st = await t.get(people.huggo)
+  const same = await t.call('state', {}, people.huggo, 'GET')
+  assert.ok(same.json.state)
+  const r = await t.api('state', { method: 'GET', query: { v: String(st.version) }, headers: { authorization: `Bearer ${people.huggo.colocId}.${people.huggo.memberId}.${people.huggo.token}` } })
+  assert.deepEqual(r.json, { same: true })
+  await t.act(people['Léa'], { type: 'chatSend', text: 'coucou' })
+  const r2 = await t.api('state', { method: 'GET', query: { v: String(st.version) }, headers: { authorization: `Bearer ${people.huggo.colocId}.${people.huggo.memberId}.${people.huggo.token}` } })
+  assert.equal(r2.json.state.chat[0].text, 'coucou')
+  assert.equal(r2.json.state.version, st.version + 1)
 })

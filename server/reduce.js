@@ -16,6 +16,9 @@ const MAX_TOKENS = 10 // appareils connectés par personne
 const MAX_PLANTS = 60
 const PLANT_LOG = 40 // événements gardés par plante (arrosages, engrais…)
 const PLANT_RENUDGE = 3 // une plante oubliée est rappelée tous les 3 jours
+const CHAT_MAX = 200 // messages gardés dans le chat
+const CHAT_LEN = 1000
+const CHAT_ACTIVE_MS = 45e3 // a lu le chat il y a moins de 45 s : il est dedans, la notif arrive sans sonner
 
 export class ActionError extends Error {
   constructor(message, status = 400, extra = {}) {
@@ -52,8 +55,8 @@ export function upgrade(doc) {
     if (!Array.isArray(m.tokens)) m.tokens = m.tokenHash ? [m.tokenHash] : []
     delete m.tokenHash
   }
-  for (const k of ['items', 'reminders', 'lost', 'claims', 'plants']) if (!Array.isArray(doc[k])) doc[k] = []
-  if (!doc.links || typeof doc.links !== 'object') doc.links = {}
+  for (const k of ['items', 'reminders', 'lost', 'claims', 'plants', 'chat']) if (!Array.isArray(doc[k])) doc[k] = []
+  for (const k of ['links', 'chatRead']) if (!doc[k] || typeof doc[k] !== 'object') doc[k] = {}
   if (doc.shopping === undefined) doc.shopping = null
   return doc
 }
@@ -228,6 +231,58 @@ const LOG_FLASH = { feed: 'Engrais noté', repot: 'Rempotage noté', prune: 'Tai
 
 const lowerFirst = (t) => (/^[A-ZÀ-Ý][a-zà-ÿ]/.test(t) ? t.charAt(0).toLowerCase() + t.slice(1) : t)
 
+/* ---------- Chat ---------- */
+/** Texte d'un message : retours à la ligne gardés (trois d'affilée au plus), caractères de contrôle retirés. */
+const msgText = (v) => String(v ?? '')
+  .replace(/\r\n?/g, '\n')
+  .replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, '')
+  .replace(/[ \t]+\n/g, '\n')
+  .replace(/\n{3,}/g, '\n\n')
+  .trim()
+  .slice(0, CHAT_LEN)
+
+/** Ce dont parle un message (objet trouvé, soirée, envie, course, plante) : copié au moment de l'envoi,
+    pour que le message garde son sens même quand l'élément n'est plus dans la liste. */
+const REF_FROM = {
+  lost: (doc, id) => { const l = find(doc.lost, id); return l && { title: l.note || 'Objet trouvé', photo: l.photo } },
+  event: (doc, id) => { const e = find(doc.events, id); return e && { title: e.title } },
+  idea: (doc, id) => { const i = find(doc.ideas, id); return i && { title: i.title, kind: i.kind } },
+  item: (doc, id) => { const i = find(doc.items, id); return i && { title: i.text, list: i.list } },
+  plant: (doc, id) => { const p = find(doc.plants, id); return p && { title: p.name, photo: p.photo || null } },
+}
+function chatRef(doc, r) {
+  const from = r && typeof r === 'object' && Object.hasOwn(REF_FROM, r.t) ? REF_FROM[r.t] : null
+  const snap = from && from(doc, String(r.id))
+  if (!snap) throw new ActionError('Ce dont tu parles n’est plus dans la liste. Retire-le pour envoyer.')
+  return { t: r.t, id: String(r.id), ...snap }
+}
+const unreadFor = (doc, id) => {
+  const at = (doc.chatRead[id] || {}).at || 0
+  return doc.chat.filter((m) => m.by !== id && m.at > at).length
+}
+
+/** Notif d'un message : seulement sur le téléphone (pas dans la liste des notifs de l'appli), et une seule à la fois :
+    la suivante remplace la précédente (« 3 nouveaux messages »). */
+function chatNotify(ctx, m) {
+  const { doc, me, now } = ctx
+  const who = nameOf(doc, me) + (m.ref ? ' · « ' + m.ref.title + ' »' : '')
+  const body = m.text.length > 180 ? m.text.slice(0, 177) + '…' : m.text
+  for (const id of others(doc, me)) {
+    const n = unreadFor(doc, id)
+    const seen = (doc.chatRead[id] || {}).seen || 0
+    ctx.out.push({
+      to: id,
+      n: {
+        id: rid('n'), key: 'chat', open: 'chat', badge: n, at: now,
+        text: n > 1 ? n + ' nouveaux messages' : who,
+        sub: n > 1 ? who + ' : ' + body : body,
+        quiet: now - seen < CHAT_ACTIVE_MS,
+        image: m.ref && m.ref.photo ? photoUrl(doc.id, m.ref.photo) : null,
+      },
+    })
+  }
+}
+
 /* ---------- Objets trouvés ---------- */
 function dropLost(ctx, l) {
   ctx.doc.lost = ctx.doc.lost.filter((x) => x.id !== l.id)
@@ -317,6 +372,7 @@ function removeMemberData(doc, id) {
   doc.waiting = doc.waiting.filter((x) => x !== id)
   if (doc.noise && doc.noise.by === id) doc.noise = null
   for (const p of doc.plants) if (p.owner === id) p.owner = null
+  delete doc.chatRead[id]
 }
 
 const find = (list, id) => list.find((x) => x.id === id)
@@ -341,7 +397,7 @@ export function newColoc({ id, code, name, max, tz, now, member }) {
     status: { [member.id]: { kind: 'home', since: now } },
     door: { closed: false, by: null, at: null },
     noise: null, waiting: [], events: [], ideas: [],
-    items: [], reminders: [], lost: [], claims: [], plants: [], links: {}, shopping: null,
+    items: [], reminders: [], lost: [], claims: [], plants: [], chat: [], chatRead: {}, links: {}, shopping: null,
     notifs: { [member.id]: [] }, push: {},
   }
 }
@@ -372,6 +428,7 @@ export function addMember(ctx, { id, name, color, tokenHash }) {
   doc.members.push({ id, name: n, color: c, tokens: [tokenHash], joinedAt: now })
   doc.status[id] = { kind: 'home', since: now }
   doc.notifs[id] = []
+  doc.chatRead[id] = { at: now, seen: 0 } // l'historique du chat est visible, mais pas « non lu »
   ctx.me = id
   const left = doc.max - mem.length - 1
   notify(ctx, others(doc, id), n + ' a rejoint la coloc',
@@ -850,6 +907,33 @@ export function applyAction(ctx, a = {}) {
       return
     }
 
+    /* ----- Chat ----- */
+    case 'chatSend': {
+      const text = msgText(a.text)
+      if (!text) throw new ActionError('Écris ton message')
+      const ref = a.ref ? chatRef(doc, a.ref) : null
+      const m = { id: rid('w'), by: me, at: now, text, ref }
+      doc.chat.push(m)
+      if (doc.chat.length > CHAT_MAX) doc.chat.splice(0, doc.chat.length - CHAT_MAX)
+      doc.chatRead[me] = { at: now, seen: now }
+      chatNotify(ctx, m)
+      return
+    }
+    case 'chatRead': {
+      const prev = doc.chatRead[me] || { at: 0 }
+      const at = Math.min(now, Number(a.at) || 0)
+      doc.chatRead[me] = { at: Math.max(prev.at || 0, at), seen: now }
+      return
+    }
+    case 'chatDelete': {
+      const m = find(doc.chat, a.id)
+      if (!m) return
+      if (m.by !== me) throw new ActionError('Tu ne peux retirer que tes messages.')
+      doc.chat = doc.chat.filter((x) => x.id !== m.id)
+      ctx.flash = 'Message retiré'
+      return
+    }
+
     default:
       throw new ActionError('Action inconnue')
   }
@@ -869,6 +953,9 @@ export function publicState(doc, me, now) {
     items: doc.items, reminders: doc.reminders, shopping: doc.shopping, links: doc.links,
     lost: doc.lost.map((l) => ({ ...l, url: photoUrl(doc.id, l.photo) })),
     plants: doc.plants.map((p) => ({ ...p, url: p.photo ? photoUrl(doc.id, p.photo) : null })),
+    chat: doc.chat.map((m) => (m.ref && m.ref.photo ? { ...m, ref: { ...m.ref, url: photoUrl(doc.id, m.ref.photo) } } : m)),
+    chatRead: (doc.chatRead[me] || {}).at || 0,
+    version: doc.version || 0,
     notifs: (doc.notifs[me] || []).filter((n) => !n.seen).slice(-10),
     pushCount: (doc.push[me] || []).length,
     devices: m ? m.tokens.length : 0,

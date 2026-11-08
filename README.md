@@ -3,7 +3,7 @@
 L'appli de la coloc, en PWA (téléphone et ordi) : qui est là, qui fait du bruit (sax !), la porte du bas,
 les propositions pour ce soir (ou dans plusieurs mois), les envies (films, sorties, projets vidéo),
 l'onglet Commun : courses et choses à faire, lien Tricount, rappels (poubelles), « à qui est-ce ? » avec photo,
-et l'onglet Plantes.
+l'onglet Plantes et un chat.
 
 - **Rejoindre ou créer une coloc** : code de 6 caractères en majuscules, sans 0 O Q, 1 I L, 2 Z, 5 S, 8 B, U V.
   Nombre max d'habitants fixé à la création (modifiable). Une fois pleine, le code ne fait plus entrer personne.
@@ -21,6 +21,13 @@ et l'onglet Plantes.
   « Je l'ai arrosée » note qui et quand (historique), « terre encore humide » repousse le prochain arrosage. Arroser une plante
   pas encore prévue demande confirmation (deux colocs qui arrosent, c'est trop d'eau). La tâche du soir envoie « … a soif »
   à la personne qui s'en occupe (aux autres si elle est en voyage), sinon à tous ceux qui sont là, puis tous les 3 jours si rien ne bouge.
+- **Chat** : un chat pour toute la coloc (200 derniers messages, dans le document de la coloc). « En parler » sur un objet
+  trouvé, une soirée, une envie, une course ou une plante ouvre le chat avec l'élément au-dessus du message ; il s'affiche
+  avec le message (copie du titre et de la photo au moment de l'envoi), et le dernier message apparaît sous l'élément.
+  Une photo encore montrée dans le chat n'est pas effacée quand l'élément disparaît : elle expire au bout de 120 jours.
+  Notifs : une seule à la fois par téléphone (« 3 nouveaux messages »), sans sonner pour qui a lu le chat il y a moins de 45 s,
+  jamais dans les bannières de l'appli. Pastille « non lu » sur l'onglet et sur l'icône de l'appli. Chat ouvert : il demande
+  l'état toutes les 3 s avec `?v=<version>`, et le serveur répond `{ same: true }` si rien n'a changé.
 - **Notifs** : Web Push (clés VAPID), sans Firebase. Sur iPhone, il faut ajouter l'appli à l'écran d'accueil.
 - **Installation** : sur Android (et Chrome/Edge sur ordi), le bouton « Installer » ouvre la fenêtre d'installation du navigateur ; sur iPhone, il ouvre un tuto adapté au navigateur (`src/Install.jsx`). La session est aussi gardée dans un cookie, car Safari recopie ses cookies (pas le localStorage) dans l'appli installée : on reste connecté après l'installation.
 

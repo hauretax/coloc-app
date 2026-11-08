@@ -59,10 +59,15 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
   }
 
   /** Ce qui se fait après une écriture réussie : photos à effacer ou à garder pour toujours (plantes),
-      index des colocs que la tâche du soir parcourt (rappels et plantes). */
+      index des colocs que la tâche du soir parcourt (rappels et plantes).
+      Une photo encore montrée dans le chat n'est pas effacée tout de suite : elle expire au bout de 120 jours. */
   async function afterWrite(doc, { dropPhotos = [], keepPhotos = [], indexReminders = false } = {}) {
     try {
-      for (const p of dropPhotos) await store.photoDel(doc.id + ':' + p)
+      const inChat = new Set((doc.chat || []).map((m) => m.ref && m.ref.photo).filter(Boolean))
+      for (const p of dropPhotos) {
+        if (inChat.has(p)) await store.photoExpire(doc.id + ':' + p, PHOTO_TTL)
+        else await store.photoDel(doc.id + ':' + p)
+      }
       for (const p of keepPhotos) await store.photoKeep(doc.id + ':' + p)
       if (indexReminders) await store.indexAdd('reminders', doc.id)
     } catch (e) {
@@ -168,13 +173,18 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
       return { status: 200, json: { session: { colocId: id, memberId, token }, state: publicState(doc, memberId, now) } }
     },
 
-    async state({ headers }) {
+    /** ?v=<version> : si rien n'a changé depuis, on répond juste « pareil » (le chat demande toutes les 3 s). */
+    async state({ headers, query = {} }) {
       const auth = parseAuth(headers)
       const now = clock()
       let doc = await load(auth.colocId)
       checkMember(doc, auth)
       const ctx = makeCtx(doc, auth.memberId, now)
-      if (normalize(ctx)) {
+      const changed = normalize(ctx)
+      if (!changed && query.v !== undefined && String(query.v) === String(doc.version || 0)) {
+        return { status: 200, json: { same: true } }
+      }
+      if (changed) {
         // Quelque chose a expiré : on l'enregistre (une seule tentative, la prochaine lecture rattrapera).
         const ok = await store.cas(doc.id, doc, doc.version || 0)
         if (ok) {
