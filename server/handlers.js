@@ -3,7 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { ALPHABET, CODE_LENGTH, cleanCode } from '../shared/rules.js'
 import {
   ActionError, makeCtx, normalize, applyAction, publicState, newColoc, addMember,
-  joinPreview, rid, upgrade, addClaim, askOthers, addToken, remindTick, pairDevice,
+  joinPreview, rid, upgrade, addClaim, askOthers, addToken, remindTick, plantTick, pairDevice,
 } from './reduce.js'
 
 const PHOTO_TTL = 120 * 86400 // secondes ; l'objet disparaît de la liste avant (90 jours au plus)
@@ -58,10 +58,12 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
     throw new ActionError('Trop de modifications en même temps, réessaie.', 409)
   }
 
-  /** Ce qui se fait après une écriture réussie : photos à effacer, index des rappels. */
-  async function afterWrite(doc, { dropPhotos = [], indexReminders = false } = {}) {
+  /** Ce qui se fait après une écriture réussie : photos à effacer ou à garder pour toujours (plantes),
+      index des colocs que la tâche du soir parcourt (rappels et plantes). */
+  async function afterWrite(doc, { dropPhotos = [], keepPhotos = [], indexReminders = false } = {}) {
     try {
       for (const p of dropPhotos) await store.photoDel(doc.id + ':' + p)
+      for (const p of keepPhotos) await store.photoKeep(doc.id + ':' + p)
       if (indexReminders) await store.indexAdd('reminders', doc.id)
     } catch (e) {
       console.error('afterWrite', e)
@@ -200,7 +202,7 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
           d.code = newCode
           ctx.flash = 'Nouveau code : l’ancien ne marche plus'
         }
-        return { out: ctx.out, flash: ctx.flash, left: !!ctx.left, dropPhotos: ctx.dropPhotos, indexReminders: ctx.indexReminders }
+        return { out: ctx.out, flash: ctx.flash, left: !!ctx.left, dropPhotos: ctx.dropPhotos, keepPhotos: ctx.keepPhotos, indexReminders: ctx.indexReminders }
       })
       if (oldCode && oldCode !== res.doc.code) await store.codeDel(oldCode)
       await afterWrite(res.doc, res)
@@ -275,7 +277,8 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
       throw new ActionError('Impossible de créer un code, réessaie.', 500)
     },
 
-    /** Photos « à qui est-ce ? » : envoi (habitant connecté) et affichage (lien impossible à deviner). */
+    /** Photos (« à qui est-ce ? », plantes) : envoi (habitant connecté) et affichage (lien impossible à deviner).
+        Une photo envoyée vit 120 jours ; celle d'une plante est gardée pour de bon une fois la plante enregistrée. */
     async photo({ method, headers, body = {}, query = {} }) {
       if (method === 'GET') {
         const c = String(query.c || '')
@@ -302,7 +305,8 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
       return { status: 200, json: { id } }
     },
 
-    /** Tâche planifiée (Vercel Cron, une fois par jour en fin d'après-midi) : rappels du soir. */
+    /** Tâche planifiée (Vercel Cron, une fois par jour en fin d'après-midi) : rappels du soir et plantes qui ont soif.
+        L'index s'appelle « reminders » depuis la v2, il contient aussi les colocs qui ont des plantes. */
     async cron({ headers }) {
       const h = headers.authorization || headers.Authorization || ''
       if (!cronSecret || !sameHash(h, 'Bearer ' + cronSecret)) return { status: 401, json: { error: 'Non autorisé' } }
@@ -314,8 +318,10 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
           const res = await mutate(id, (d) => {
             const ctx = makeCtx(d, null, now)
             normalize(ctx)
-            if (!d.reminders.length) return { skipWrite: true, empty: true }
-            if (!remindTick(ctx)) return { skipWrite: true }
+            if (!d.reminders.length && !d.plants.length) return { skipWrite: true, empty: true }
+            const reminded = remindTick(ctx)
+            const nudged = plantTick(ctx)
+            if (!reminded && !nudged) return { skipWrite: true }
             return { out: ctx.out, dropPhotos: ctx.dropPhotos }
           })
           if (res.empty) await store.indexDel('reminders', id)

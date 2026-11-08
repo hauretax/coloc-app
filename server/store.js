@@ -50,6 +50,7 @@ export function memoryStore(clock = () => Date.now()) {
     async photoPut(key, b64) { kv.set('photo:' + key, b64) },
     async photoGet(key) { return kv.get('photo:' + key) || null },
     async photoDel(key) { kv.delete('photo:' + key) },
+    async photoKeep() { /* en mémoire, rien n'expire */ },
     async indexAdd(set, id) {
       if (!sets.has(set)) sets.set(set, new Set())
       sets.get(set).add(id)
@@ -102,6 +103,7 @@ export function redisStore(url, token) {
     async photoPut(key, b64, ttlSec) { await r.set('photo:' + key, b64, { ex: ttlSec }) },
     async photoGet(key) { return (await r.get('photo:' + key)) || null },
     async photoDel(key) { await r.del('photo:' + key) },
+    async photoKeep(key) { await r.persist('photo:' + key) }, // photo d'une plante : plus de date d'expiration
     // Index des colocs qui ont des rappels, parcouru par la tâche du soir.
     async indexAdd(set, id) { await r.sadd('index:' + set, id) },
     async indexAll(set) { return (await r.smembers('index:' + set)) || [] },

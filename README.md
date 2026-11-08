@@ -2,7 +2,8 @@
 
 L'appli de la coloc, en PWA (téléphone et ordi) : qui est là, qui fait du bruit (sax !), la porte du bas,
 les propositions pour ce soir (ou dans plusieurs mois), les envies (films, sorties, projets vidéo),
-et l'onglet Commun : courses et choses à faire, lien Tricount, rappels (poubelles), « à qui est-ce ? » avec photo.
+l'onglet Commun : courses et choses à faire, lien Tricount, rappels (poubelles), « à qui est-ce ? » avec photo,
+et l'onglet Plantes.
 
 - **Rejoindre ou créer une coloc** : code de 6 caractères en majuscules, sans 0 O Q, 1 I L, 2 Z, 5 S, 8 B, U V.
   Nombre max d'habitants fixé à la création (modifiable). Une fois pleine, le code ne fait plus entrer personne.
@@ -14,6 +15,12 @@ et l'onglet Commun : courses et choses à faire, lien Tricount, rappels (poubell
   - **« C'est moi »** : code de la coloc, choix de son prénom, puis validation depuis un appareil déjà connecté
     (carte « c'est toi ? » sur Maison, et notif) ou par un coloc.
   On peut déconnecter ses autres appareils dans les réglages.
+- **Plantes** : on choisit l'espèce dans un catalogue d'une trentaine de plantes d'intérieur (`shared/plants.js`) qui préremplit
+  la fiche : arrosage (printemps-été / automne-hiver, d'octobre à février on espace), lumière, humidité, température minimale,
+  engrais (de mars à septembre), rempotage, toxicité pour les chats et les chiens, un conseil. Photo, pièce, qui s'en occupe, notes.
+  « Je l'ai arrosée » note qui et quand (historique), « terre encore humide » repousse le prochain arrosage. Arroser une plante
+  pas encore prévue demande confirmation (deux colocs qui arrosent, c'est trop d'eau). La tâche du soir envoie « … a soif »
+  à la personne qui s'en occupe (aux autres si elle est en voyage), sinon à tous ceux qui sont là, puis tous les 3 jours si rien ne bouge.
 - **Notifs** : Web Push (clés VAPID), sans Firebase. Sur iPhone, il faut ajouter l'appli à l'écran d'accueil.
 - **Installation** : sur Android (et Chrome/Edge sur ordi), le bouton « Installer » ouvre la fenêtre d'installation du navigateur ; sur iPhone, il ouvre un tuto adapté au navigateur (`src/Install.jsx`). La session est aussi gardée dans un cookie, car Safari recopie ses cookies (pas le localStorage) dans l'appli installée : on reste connecté après l'installation.
 
@@ -21,9 +28,10 @@ et l'onglet Commun : courses et choses à faire, lien Tricount, rappels (poubell
 
 - `src/` : l'appli React (Vite + vite-plugin-pwa, service worker maison dans `src/sw.js`).
 - `api/` : fonctions Vercel, une par route (`create`, `join`, `state`, `action`, `vapid`, `claim`, `pair`, `photo`, `cron`).
-- `vercel.json` : la tâche du soir (`/api/cron`, tous les jours à 17 h UTC) qui envoie les rappels.
+- `vercel.json` : la tâche du soir (`/api/cron`, tous les jours à 17 h UTC) qui envoie les rappels et « … a soif ».
 - `server/` : logique de la coloc (`reduce.js`), routes (`handlers.js`), stockage Redis/mémoire (`store.js`), push.
 - `shared/rules.js` : règles et libellés communs (codes, dates « ce soir / ce week-end », statuts).
+- `shared/plants.js` : fiches des plantes et calcul du prochain arrosage (partagé par l'appli et le serveur).
 
 ## Développement
 
@@ -40,7 +48,7 @@ Variables d'environnement :
 - `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` : notifications (`npx web-push generate-vapid-keys`).
 - `CRON_SECRET` : Vercel l'envoie à `/api/cron` ; sans lui, la tâche des rappels est refusée.
 
-Les photos « à qui est-ce ? » sont dans Redis (`photo:<coloc>:<id>`, 120 jours au plus, effacées dès que l'objet
-est réclamé). Leur adresse contient un identifiant aléatoire de 128 bits, impossible à deviner.
+Les photos sont dans Redis (`photo:<coloc>:<id>`). Celles d'« à qui est-ce ? » vivent 120 jours au plus et sont effacées
+dès que l'objet est réclamé ; celles des plantes sont gardées (PERSIST) tant que la plante existe. Leur adresse contient un identifiant aléatoire de 128 bits, impossible à deviner.
 
 Sans Redis sur Vercel, l'API répond 503 plutôt que de perdre des données.

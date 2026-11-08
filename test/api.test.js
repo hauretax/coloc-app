@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { makeApi } from '../server/handlers.js'
 import { memoryStore } from '../server/store.js'
 import { cleanCode, ALPHABET, whenRange, bucket, untilLabel, dayShort, isoAdd } from '../shared/rules.js'
+import { PLANTS, LIGHT, HUM, FEEDS, plantDue, feedDue } from '../shared/plants.js'
 
 // Samedi 7 novembre 2026, 16h20 à Paris
 const T0 = Date.parse('2026-11-07T15:20:00Z')
@@ -396,4 +397,120 @@ test('à qui est-ce ? : photo, pas à moi, personne ne le réclame', async () =>
   const mine = await t.act(people['Léa'], { type: 'lostMine', id: it2.id })
   assert.equal(mine.state.lost.length, 0)
   assert.ok(t.sent.some((s) => s.to === people.Sam.memberId && s.text === 'C’est à Léa'))
+})
+
+test('plantes : prochain arrosage selon la saison, engrais de mars à septembre', () => {
+  const p = { water: [7, 14], feed: 30, log: [{ k: 'water', at: Date.parse('2027-05-01T10:00:00Z') }], snooze: null }
+  assert.deepEqual(plantDue(p, '2027-05-03', 'Europe/Paris'), { due: '2027-05-08', last: '2027-05-01', lastBy: undefined, every: 7, late: -5 })
+  assert.equal(plantDue(p, '2027-11-03', 'Europe/Paris').every, 14, 'en automne-hiver, on espace')
+  assert.equal(plantDue({ ...p, log: [] }, '2027-05-03', 'Europe/Paris').late, 0, 'jamais arrosée : aujourd’hui')
+  assert.equal(plantDue({ ...p, snooze: '2027-05-10' }, '2027-05-03', 'Europe/Paris').due, '2027-05-10', 'pas encore soif')
+  assert.equal(feedDue(p, '2027-05-03', 'Europe/Paris'), true)
+  assert.equal(feedDue(p, '2027-11-03', 'Europe/Paris'), false, 'pas d’engrais en hiver')
+  assert.equal(feedDue({ ...p, feed: 0 }, '2027-05-03', 'Europe/Paris'), false)
+  for (const [k, sp] of Object.entries(PLANTS)) {
+    assert.ok(sp.water[0] <= sp.water[1], k + ' : on arrose moins en hiver')
+    assert.ok(LIGHT[sp.light] && HUM[sp.hum] && FEEDS.includes(sp.feed), k)
+  }
+})
+
+test('plantes : ajouter, arroser, pas encore soif, modifier, photo, retirer', async () => {
+  const t = setup()
+  const { people } = await coloc(t, 3)
+  assert.equal((await t.call('action', { type: 'plantAdd', sp: 'autre', name: ' ' }, people.huggo)).status, 400, 'une plante inconnue a besoin d’un nom')
+  // Samedi 7 novembre : automne-hiver, la Monstera se contente d'un arrosage tous les 14 jours.
+  let st = (await t.act(people.huggo, { type: 'plantAdd', sp: 'monstera', room: 'Salon', ago: 7 })).state
+  const mon = st.plants[0]
+  assert.equal(mon.name, 'Monstera')
+  assert.deepEqual(mon.water, [7, 14])
+  assert.equal(mon.toxic, true)
+  assert.equal(plantDue(mon, '2026-11-07', 'Europe/Paris').due, '2026-11-14')
+  st = (await t.act(people.huggo, { type: 'plantAdd', sp: 'basilic', name: 'Basilic du balcon', owner: people['Léa'].memberId })).state
+  const bas = st.plants[1]
+  assert.equal(bas.owner, people['Léa'].memberId)
+  assert.equal(plantDue(bas, '2026-11-07', 'Europe/Paris').late, 0, 'jamais arrosé : à faire')
+  const w = await t.act(people['Léa'], { type: 'plantLog', id: bas.id, kind: 'water' })
+  assert.equal(w.flash, 'Arrosée. Prochain arrosage : mardi 10 novembre')
+  assert.equal(w.state.plants[1].log[0].by, people['Léa'].memberId)
+  // Mardi : le basilic a soif, mais la terre est encore humide.
+  t.tick(3 * 864e5)
+  const ck = await t.act(people.Sam, { type: 'plantLog', id: bas.id, kind: 'check' })
+  assert.equal(ck.flash, 'OK, on la revérifie demain')
+  const b2 = ck.state.plants[1]
+  assert.equal(plantDue(b2, '2026-11-10', 'Europe/Paris').due, '2026-11-11')
+  const undo = await t.act(people.Sam, { type: 'plantLogDelete', id: bas.id, log: b2.log[1].id })
+  assert.equal(undo.state.plants[1].snooze, null, 'pas encore soif retiré : on n’attend plus')
+  // Arrosée hier, oublié de le noter
+  const y = await t.act(people.huggo, { type: 'plantLog', id: mon.id, kind: 'water', ago: 1 })
+  assert.equal(plantDue(y.state.plants[0], '2026-11-10', 'Europe/Paris').last, '2026-11-09')
+  assert.equal((await t.call('action', { type: 'plantLog', id: mon.id, kind: 'water', ago: 99 }, people.huggo)).status, 400)
+  // Modifier : nom vide = nom de l'espèce, lumière inconnue = on garde l'ancienne
+  const ed = await t.act(people.Sam, { type: 'plantEdit', id: mon.id, sp: 'monstera', name: '', light: 'néon', water: [6, 12], room: 'Chambre', notes: 'Tuteur à changer' })
+  assert.deepEqual([ed.state.plants[0].name, ed.state.plants[0].light, ed.state.plants[0].water, ed.state.plants[0].room], ['Monstera', 'vive', [6, 12], 'Chambre'])
+  // Photo : gardée pour de bon une fois la plante enregistrée, effacée quand on la change ou qu'on retire la plante
+  const kept = []
+  const keep = t.store.photoKeep
+  t.store.photoKeep = async (k) => { kept.push(k); return keep(k) }
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]).toString('base64')
+  const ph = (await t.call('photo', { data: jpeg }, people.Sam)).json.id
+  await t.act(people.Sam, { type: 'plantEdit', id: mon.id, name: 'Gérard' })
+  const withPhoto = await t.act(people.Sam, { type: 'plantEdit', id: mon.id, photo: ph })
+  assert.deepEqual([withPhoto.state.plants[0].name, withPhoto.state.plants[0].room], ['Gérard', 'Chambre'], 'changer la photo ne touche pas au reste')
+  assert.equal(withPhoto.state.plants[0].url, '/api/photo?c=' + people.Sam.colocId + '&p=' + ph)
+  assert.deepEqual(kept, [people.Sam.colocId + ':' + ph])
+  const photoStatus = async () => (await t.api('photo', { method: 'GET', query: { c: people.Sam.colocId, p: ph } })).status
+  assert.equal(await photoStatus(), 200)
+  await t.act(people.Sam, { type: 'plantDelete', id: mon.id })
+  assert.equal(await photoStatus(), 404)
+  // Léa quitte la coloc : le basilic n'a plus de responsable
+  const left = await t.act(people.huggo, { type: 'memberRemove', id: people['Léa'].memberId })
+  assert.deepEqual(left.state.plants.map((p) => [p.name, p.owner]), [['Basilic du balcon', null]])
+})
+
+test('plantes : la tâche du soir prévient qui s’en occupe, une fois, puis tous les 3 jours', async () => {
+  const t = setup()
+  const { people } = await coloc(t, 3)
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]).toString('base64')
+  const ph = (await t.call('photo', { data: jpeg }, people.huggo)).json.id
+  const add = (body) => t.act(people.huggo, { type: 'plantAdd', ...body })
+  await add({ sp: 'monstera', ago: 14, photo: ph }) // à arroser aujourd'hui
+  await add({ sp: 'basilic', ago: 0 }) // mardi
+  const st = (await add({ sp: 'pothos', ago: 20, owner: people['Léa'].memberId })).state // en retard, c'est Léa qui s'en occupe
+  const [mon, bas, pot] = st.plants
+  const cron = () => t.api('cron', { method: 'GET', headers: { authorization: 'Bearer sekret' } })
+  t.sent.length = 0
+  assert.deepEqual((await cron()).json, { colocs: 1, sent: 3 })
+  const to = (who) => t.sent.filter((s) => s.to === people[who].memberId).map((s) => s.text)
+  assert.deepEqual(to('Léa'), ['2 plantes ont soif'])
+  assert.deepEqual(to('huggo'), ['Monstera a soif'])
+  assert.deepEqual(to('Sam'), ['Monstera a soif'])
+  assert.equal(t.sent.find((s) => s.to === people.huggo.memberId).image, '/api/photo?c=' + people.huggo.colocId + '&p=' + ph)
+  assert.equal((await cron()).json.sent, 0, 'pas deux fois le même soir')
+  t.tick(864e5)
+  assert.equal((await cron()).json.sent, 0, 'pas tous les soirs')
+  // Dimanche : Huggo arrose la Monstera, le Pothos a encore soif ; puis Léa l'arrose, tout est fait.
+  t.sent.length = 0
+  await t.act(people.huggo, { type: 'plantLog', id: mon.id, kind: 'water' })
+  assert.equal(t.sent.length, 0)
+  await t.act(people['Léa'], { type: 'plantLog', ids: [pot.id], kind: 'water' })
+  assert.deepEqual(t.sent.map((s) => [s.text, s.quiet]), [['Léa a arrosé les plantes', true], ['Léa a arrosé les plantes', true]])
+  assert.ok(!(await t.get(people.Sam)).notifs.some((n) => n.key === 'plants'), 'la notif disparaît dans l’appli')
+  // Mardi : le basilic. Mercredi : rien. Vendredi : on rappelle, sauf à Sam qui est en voyage.
+  t.tick(2 * 864e5)
+  t.sent.length = 0
+  assert.equal((await cron()).json.sent, 3)
+  assert.ok(t.sent.every((s) => s.text === 'Basilic a soif'))
+  t.tick(864e5)
+  assert.equal((await cron()).json.sent, 0)
+  await t.act(people.Sam, { type: 'status', kind: 'away', back: 'dans une semaine' })
+  t.tick(2 * 864e5)
+  assert.equal((await cron()).json.sent, 2)
+  // Vendredi soir, la terre est encore humide : on revient voir demain, et la notif repart.
+  await t.act(people.huggo, { type: 'plantLog', id: bas.id, kind: 'check' })
+  t.tick(864e5)
+  assert.equal((await cron()).json.sent, 2)
+  // Plus de plantes ni de rappels : la coloc sort de l'index du soir.
+  for (const id of [mon.id, bas.id, pot.id]) await t.act(people.huggo, { type: 'plantDelete', id })
+  assert.deepEqual((await cron()).json, { colocs: 1, sent: 0 })
+  assert.deepEqual((await cron()).json, { colocs: 0, sent: 0 })
 })

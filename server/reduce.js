@@ -2,8 +2,9 @@
 // et prépare les notifications à envoyer. Aucune entrée/sortie ici, tout est testable.
 import {
   KINDS, WHAT, TYPES, IKINDS, STAGES, WHEN_KEYS, MAX_MEMBERS, MIN_MEMBERS, PALETTE, MAX_AHEAD, LISTS, DEVICES,
-  todayISO, hm, untilLabel, whenRange, whenPhrase, isISO, dayDiff, listNames, weekday, photoUrl,
+  todayISO, hm, untilLabel, whenRange, whenPhrase, isISO, dayDiff, listNames, weekday, photoUrl, isoAdd, dayLong, plural,
 } from '../shared/rules.js'
+import { PLANTS, LIGHT, HUM, FEEDS, LOGS, plantDue, snoozeDays, lastLog } from '../shared/plants.js'
 
 const NOTIF_CAP = 30
 const NOISE_MAX_MS = 4 * 3600e3 // une session sans heure de fin s'arrête toute seule après 4 h
@@ -12,6 +13,9 @@ const DONE_KEEP_MS = 3 * 864e5 // les courses cochées restent visibles 3 jours
 const SHOPPING_MS = 2 * 3600e3 // « je fais les courses » dure 2 h
 const LOST_MAX_MS = 90 * 864e5 // un objet trouvé jamais réclamé disparaît au bout de 3 mois
 const MAX_TOKENS = 10 // appareils connectés par personne
+const MAX_PLANTS = 60
+const PLANT_LOG = 40 // événements gardés par plante (arrosages, engrais…)
+const PLANT_RENUDGE = 3 // une plante oubliée est rappelée tous les 3 jours
 
 export class ActionError extends Error {
   constructor(message, status = 400, extra = {}) {
@@ -38,7 +42,7 @@ export function freeColor(doc) {
 
 /** Contexte d'une requête : le document, qui agit, l'heure, et ce qu'il faudra envoyer. */
 export function makeCtx(doc, me, now, tokenHash = null) {
-  return { doc, me, now, tokenHash, out: [], flash: null, newCode: false, dropPhotos: [], indexReminders: false }
+  return { doc, me, now, tokenHash, out: [], flash: null, newCode: false, dropPhotos: [], keepPhotos: [], indexReminders: false }
 }
 
 /** Met à niveau un document écrit par une version plus ancienne de l'appli. */
@@ -48,7 +52,7 @@ export function upgrade(doc) {
     if (!Array.isArray(m.tokens)) m.tokens = m.tokenHash ? [m.tokenHash] : []
     delete m.tokenHash
   }
-  for (const k of ['items', 'reminders', 'lost', 'claims']) if (!Array.isArray(doc[k])) doc[k] = []
+  for (const k of ['items', 'reminders', 'lost', 'claims', 'plants']) if (!Array.isArray(doc[k])) doc[k] = []
   if (!doc.links || typeof doc.links !== 'object') doc.links = {}
   if (doc.shopping === undefined) doc.shopping = null
   return doc
@@ -143,6 +147,85 @@ export function remindTick(ctx) {
   return changed
 }
 
+/* ---------- Plantes ---------- */
+/** Tâche du soir : prévient quand une plante a soif. Sa ou son responsable si elle en a un (et qu'il n'est pas
+    en voyage), sinon tout le monde à la coloc. Une notif par personne, puis un rappel tous les 3 jours si rien ne bouge. */
+export function plantTick(ctx) {
+  const { doc, now } = ctx
+  const actor = ctx.me
+  ctx.me = null
+  const today = todayISO(now, doc.tz)
+  const here = activeMembers(doc).map((m) => m.id).filter((id) => doc.status[id]?.kind !== 'away')
+  const per = new Map()
+  let changed = false
+  for (const p of doc.plants) {
+    const d = plantDue(p, today, doc.tz)
+    if (d.late < 0) continue
+    const ck = lastLog(p, 'check')
+    const touched = [d.last, ck && todayISO(ck.at, doc.tz)].filter(Boolean).sort().pop() || ''
+    if (p.nudged && p.nudged > touched && dayDiff(today, p.nudged) < PLANT_RENUDGE) continue
+    const to = p.owner && here.includes(p.owner) ? [p.owner] : here
+    if (!to.length) continue
+    p.nudged = today
+    changed = true
+    for (const id of to) per.set(id, (per.get(id) || []).concat(p))
+  }
+  for (const [id, list] of per) {
+    for (const n of doc.notifs[id] || []) if (n.key === 'plants') n.seen = true
+    const one = list.length === 1
+    notify(ctx, [id], one ? list[0].name + ' a soif' : list.length + ' plantes ont soif',
+      (one ? '' : listNames(list.map((p) => p.name)) + '. ') + 'Touche la terre avant d’arroser : si elle est encore humide, attends un peu.',
+      [{ l: 'Voir les plantes', a: 'openPlantes' }, { l: 'Plus tard', a: 'dismiss' }], 'plants',
+      one && list[0].photo ? { image: photoUrl(doc.id, list[0].photo) } : null)
+  }
+  ctx.me = actor
+  return changed
+}
+
+/** Plus rien à arroser : la notif « … a soif » est remplacée, sans sonner, chez ceux qui l'avaient. */
+function plantsWatered(ctx, today) {
+  const { doc, me } = ctx
+  if (doc.plants.some((p) => plantDue(p, today, doc.tz).late >= 0)) return
+  const told = Object.keys(doc.notifs).filter((id) => id !== me && doc.notifs[id].some((n) => n.key === 'plants' && !n.seen))
+  markSeenKey(doc, 'plants')
+  if (told.length) {
+    notify(ctx, told, nameOf(doc, me) + ' a arrosé les plantes', 'Rien à faire pour toi.', [], 'plants', { quiet: true, seen: true })
+  }
+}
+
+const validPhoto = (v) => (typeof v === 'string' && /^[a-f0-9]{32}$/.test(v) ? v : null)
+
+/** Champs d'une plante envoyés par le formulaire, vérifiés. Un champ absent garde sa valeur ;
+    à la création, il vient de la fiche de l'espèce. */
+function plantFields(doc, a, cur) {
+  const v = (k) => (a[k] === undefined && cur ? cur[k] : a[k])
+  const sp = PLANTS[v('sp')] ? v('sp') : 'autre'
+  const base = PLANTS[sp]
+  const prev = cur || base
+  const int = (x, lo, hi, d) => {
+    const n = Math.round(Number(x))
+    return Number.isFinite(n) && n >= lo && n <= hi ? n : d
+  }
+  const w = Array.isArray(v('water')) ? v('water') : prev.water
+  const name = str(v('name'), 30) || (sp === 'autre' ? '' : base.n)
+  if (!name) throw new ActionError('Donne-lui un nom')
+  const toxic = v('toxic')
+  return {
+    sp,
+    name,
+    room: str(v('room'), 30),
+    water: [int(w[0], 1, 60, prev.water[0]), int(w[1], 1, 90, prev.water[1])],
+    light: LIGHT[v('light')] ? v('light') : prev.light,
+    hum: HUM[v('hum')] ? v('hum') : prev.hum,
+    feed: FEEDS.includes(Number(v('feed'))) ? Number(v('feed')) : prev.feed,
+    toxic: toxic === true || toxic === false || toxic === null ? toxic : prev.toxic,
+    owner: activeMembers(doc).some((m) => m.id === v('owner')) ? v('owner') : null,
+    notes: str(v('notes'), 400),
+  }
+}
+
+const LOG_FLASH = { feed: 'Engrais noté', repot: 'Rempotage noté', prune: 'Taille notée' }
+
 const lowerFirst = (t) => (/^[A-ZÀ-Ý][a-zà-ÿ]/.test(t) ? t.charAt(0).toLowerCase() + t.slice(1) : t)
 
 /* ---------- Objets trouvés ---------- */
@@ -233,6 +316,7 @@ function removeMemberData(doc, id) {
   delete doc.status[id]
   doc.waiting = doc.waiting.filter((x) => x !== id)
   if (doc.noise && doc.noise.by === id) doc.noise = null
+  for (const p of doc.plants) if (p.owner === id) p.owner = null
 }
 
 const find = (list, id) => list.find((x) => x.id === id)
@@ -257,7 +341,7 @@ export function newColoc({ id, code, name, max, tz, now, member }) {
     status: { [member.id]: { kind: 'home', since: now } },
     door: { closed: false, by: null, at: null },
     noise: null, waiting: [], events: [], ideas: [],
-    items: [], reminders: [], lost: [], claims: [], links: {}, shopping: null,
+    items: [], reminders: [], lost: [], claims: [], plants: [], links: {}, shopping: null,
     notifs: { [member.id]: [] }, push: {},
   }
 }
@@ -692,6 +776,80 @@ export function applyAction(ctx, a = {}) {
       return
     }
 
+    /* ----- Plantes ----- */
+    case 'plantAdd': {
+      if (doc.plants.length >= MAX_PLANTS) throw new ActionError(MAX_PLANTS + ' plantes au maximum')
+      const photo = validPhoto(a.photo)
+      const p = { id: rid('p'), ...plantFields(doc, a, null), photo, log: [], snooze: null, nudged: null, by: me, at: now }
+      // Dernier arrosage, s'il est connu : « aujourd'hui », « hier », « il y a une semaine »…
+      const ago = a.ago === null || a.ago === undefined || a.ago === '' ? null : Math.round(Number(a.ago))
+      if (ago !== null && ago >= 0 && ago <= 60) p.log.push({ id: rid('l'), k: 'water', by: me, at: now - ago * 864e5 })
+      doc.plants.push(p)
+      if (photo) ctx.keepPhotos.push(photo)
+      ctx.indexReminders = true // la tâche du soir passe aussi par les plantes
+      ctx.flash = 'Plante ajoutée'
+      return
+    }
+    case 'plantEdit': {
+      const p = find(doc.plants, a.id)
+      if (!p) throw new ActionError('Cette plante n’existe plus.')
+      Object.assign(p, plantFields(doc, a, p))
+      if (a.photo !== undefined) {
+        const photo = validPhoto(a.photo)
+        if (photo !== p.photo) {
+          if (p.photo) ctx.dropPhotos.push(p.photo)
+          if (photo) ctx.keepPhotos.push(photo)
+          p.photo = photo
+        }
+      }
+      ctx.flash = 'Enregistré'
+      return
+    }
+    case 'plantDelete': {
+      const p = find(doc.plants, a.id)
+      if (!p) return
+      doc.plants = doc.plants.filter((x) => x.id !== p.id)
+      if (p.photo) ctx.dropPhotos.push(p.photo)
+      ctx.flash = 'Plante retirée'
+      return
+    }
+    case 'plantLog': {
+      if (!LOGS[a.kind]) throw new ActionError('Action inconnue')
+      const ids = Array.isArray(a.ids) ? a.ids.slice(0, MAX_PLANTS) : [a.id]
+      const list = ids.map((id) => find(doc.plants, id)).filter(Boolean)
+      if (!list.length) throw new ActionError('Cette plante n’existe plus.')
+      const ago = Math.round(Number(a.ago) || 0)
+      if (!(ago >= 0 && ago <= 30)) throw new ActionError('Choisis un jour dans le mois passé')
+      for (const p of list) {
+        p.log.push({ id: rid('l'), k: a.kind, by: me, at: now - ago * 864e5 })
+        p.log.sort((x, y) => x.at - y.at)
+        if (p.log.length > PLANT_LOG) p.log.splice(0, p.log.length - PLANT_LOG)
+        if (a.kind === 'water') p.snooze = null
+        if (a.kind === 'check') p.snooze = isoAdd(today, snoozeDays(plantDue(p, today, tz).every))
+      }
+      const one = list[0]
+      if (a.kind === 'water') {
+        plantsWatered(ctx, today)
+        ctx.flash = list.length > 1
+          ? plural(list.length, 'plante') + ' arrosées'
+          : 'Arrosée. Prochain arrosage : ' + dayLong(plantDue(one, today, tz).due, today).toLowerCase()
+      } else if (a.kind === 'check') {
+        ctx.flash = 'OK, on la revérifie ' + dayLong(one.snooze, today).toLowerCase()
+      } else ctx.flash = LOG_FLASH[a.kind]
+      return
+    }
+    case 'plantLogDelete': {
+      const p = find(doc.plants, a.id)
+      if (!p) return
+      p.log = p.log.filter((l) => l.id !== a.log)
+      // « Pas encore soif » retiré : on n'attend plus.
+      const ck = lastLog(p, 'check')
+      const w = lastLog(p, 'water')
+      if (!ck || (w && w.at > ck.at)) p.snooze = null
+      ctx.flash = 'Retiré de l’historique'
+      return
+    }
+
     default:
       throw new ActionError('Action inconnue')
   }
@@ -710,6 +868,7 @@ export function publicState(doc, me, now) {
     events: doc.events, ideas: doc.ideas,
     items: doc.items, reminders: doc.reminders, shopping: doc.shopping, links: doc.links,
     lost: doc.lost.map((l) => ({ ...l, url: photoUrl(doc.id, l.photo) })),
+    plants: doc.plants.map((p) => ({ ...p, url: p.photo ? photoUrl(doc.id, p.photo) : null })),
     notifs: (doc.notifs[me] || []).filter((n) => !n.seen).slice(-10),
     pushCount: (doc.push[me] || []).length,
     devices: m ? m.tokens.length : 0,

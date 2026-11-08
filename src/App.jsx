@@ -3,6 +3,8 @@ import { api, ApiError, loadSession, saveSession } from './api.js'
 import { Icon, Av, Avs, Chips, Label, Sheet, Stepper, Logo, copyText } from './ui.jsx'
 import Onboarding from './Onboarding.jsx'
 import { InstallCard, InstallSheet, useInstallAction } from './Install.jsx'
+import { Plantes, PlantNudge, PlantSheet, PlantForm } from './Plants.jsx'
+import { shrinkPhoto } from './photo.js'
 import { pushStatus, enablePush, resyncPush } from './push.js'
 import {
   KINDS, WHAT, TYPES, IKINDS, STAGES, BUCKETS, MAX_MEMBERS, MIN_MEMBERS, MAX_AHEAD, LISTS, WEEK, WD, WD_LETTER,
@@ -198,14 +200,15 @@ function Coloc({ session, boot, onGone }) {
     session, push, enable, refresh,
   }
 
-  const titles = { home: st.name, agenda: 'Agenda', envies: 'Envies', commun: 'Commun' }
+  const titles = { home: st.name, agenda: 'Agenda', envies: 'Envies', commun: 'Commun', plantes: 'Plantes' }
   const subs = {
     home: new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', timeZone: tz }).format(now),
     agenda: 'Ce soir, demain, ce week-end, plus tard…',
     envies: 'Films, idées de sorties, projets vidéo',
     commun: 'Courses, choses à faire, rappels, objets trouvés',
+    plantes: 'Quand arroser, où les mettre, qui s’en occupe',
   }
-  const tabs = [['home', 'Maison', 'home'], ['agenda', 'Agenda', 'cal'], ['envies', 'Envies', 'bulb'], ['commun', 'Commun', 'cart']]
+  const tabs = [['home', 'Maison', 'home'], ['agenda', 'Agenda', 'cal'], ['envies', 'Envies', 'bulb'], ['commun', 'Commun', 'cart'], ['plantes', 'Plantes', 'leaf']]
   const meK = KINDS[status(st.me).kind]
 
   return (
@@ -234,7 +237,9 @@ function Coloc({ session, boot, onGone }) {
                 <button type="button" className="icon-btn" onClick={() => c.open('coloc')} aria-label="La coloc : code et habitants"><Icon n="users" s={19} /></button>
                 <button type="button" className="me-btn" onClick={() => c.open('status')} aria-label="Changer mon statut"><Av p={P(st.me)} s={38} /></button>
               </div>
-            ) : tab === 'commun' ? null : (
+            ) : tab === 'commun' ? null : tab === 'plantes' ? (
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => c.open('plantForm')}><Icon n="plus" s={18} />Ajouter</button>
+            ) : (
               <button type="button" className="btn btn-primary btn-sm" onClick={() => c.open(tab === 'agenda' ? 'addEvent' : 'addIdea', tab === 'envies' && filter !== 'all' ? { kind: filter } : {})}>
                 <Icon n="plus" s={18} />{tab === 'agenda' ? 'Proposer' : 'Ajouter'}
               </button>
@@ -244,7 +249,8 @@ function Coloc({ session, boot, onGone }) {
             {tab === 'home' ? <Home c={c} />
               : tab === 'agenda' ? <Agenda c={c} />
                 : tab === 'envies' ? <Envies c={c} filter={filter} setFilter={setFilter} />
-                  : <Commun c={c} />}
+                  : tab === 'plantes' ? <Plantes c={c} />
+                    : <Commun c={c} />}
           </div>
         </div>
       </div>
@@ -271,6 +277,7 @@ function Home({ c }) {
         <InstallCard onTuto={() => c.open('install')} flash={c.flash} />
         <PushCard c={c} />
         <LostNudge c={c} />
+        <PlantNudge c={c} />
         <Who c={c} />
         <Soon c={c} />
       </div>
@@ -815,26 +822,6 @@ function LostItem({ c, l }) {
   )
 }
 
-/** Réduit la photo (1280 px, JPEG) avant l'envoi : quelques centaines de Ko au lieu de plusieurs Mo. */
-async function shrinkPhoto(file) {
-  const url = URL.createObjectURL(file)
-  try {
-    const img = await new Promise((ok, ko) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ko; i.src = url })
-    let size = 1280
-    for (let q = 0.8; ; q -= 0.15, size = Math.round(size * 0.8)) {
-      const k = Math.min(1, size / Math.max(img.naturalWidth, img.naturalHeight))
-      const cv = document.createElement('canvas')
-      cv.width = Math.round(img.naturalWidth * k)
-      cv.height = Math.round(img.naturalHeight * k)
-      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height)
-      const data = cv.toDataURL('image/jpeg', q)
-      if (data.length < 1_300_000 || q < 0.4) return data
-    }
-  } finally {
-    URL.revokeObjectURL(url)
-  }
-}
-
 /* ---------- Notification dans l'appli ---------- */
 function PushBanner({ c }) {
   const list = c.st.notifs
@@ -856,6 +843,7 @@ function PushBanner({ c }) {
       case 'lostMine': c.act({ type: 'lostMine', id: a.v, seenId }); break
       case 'lostNot': c.act({ type: 'lostNot', id: a.v, seenId }); break
       case 'openCommun': c.act({ type: 'seen', seenId }); c.setTab('commun'); break
+      case 'openPlantes': c.act({ type: 'seen', seenId }); c.setTab('plantes'); break
       default: c.act({ type: 'seen', seenId })
     }
   }
@@ -896,6 +884,8 @@ function Sheets({ c, sheet }) {
     case 'tricount': return <TricountSheet {...props} />
     case 'install': return <InstallSheet onClose={c.close} code={c.st.code} />
     case 'pair': return <PairSheet c={c} />
+    case 'plant': return <PlantSheet key={sheet.id} {...props} />
+    case 'plantForm': return <PlantForm key={sheet.id || 'new'} {...props} />
     default: return null
   }
 }
