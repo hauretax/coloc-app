@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { makeApi } from '../server/handlers.js'
 import { memoryStore } from '../server/store.js'
-import { cleanCode, ALPHABET, whenRange, bucket, untilLabel, dayShort, isoAdd } from '../shared/rules.js'
+import { cleanCode, ALPHABET, whenRange, bucket, untilLabel, dayShort, isoAdd, weekendOf, weekendList, weekendSlot } from '../shared/rules.js'
 import { PLANTS, LIGHT, HUM, FEEDS, plantDue, feedDue } from '../shared/plants.js'
 
 // Samedi 7 novembre 2026, 16h20 à Paris
@@ -616,4 +616,43 @@ test('état : rien de changé depuis la version affichée, réponse vide', async
   const r2 = await t.api('state', { method: 'GET', query: { v: String(st.version) }, headers: { authorization: `Bearer ${people.huggo.colocId}.${people.huggo.memberId}.${people.huggo.token}` } })
   assert.equal(r2.json.state.chat[0].text, 'coucou')
   assert.equal(r2.json.state.version, st.version + 1)
+})
+
+test('week-end : là ou pas, 4 week-ends, le soir où l’on n’est pas là les rappels vont aux autres', async () => {
+  assert.deepEqual(['2026-11-09', '2026-11-13', '2026-11-14', '2026-11-15'].map(weekendOf), ['2026-11-14', '2026-11-14', '2026-11-14', '2026-11-14'])
+  assert.deepEqual(weekendList('2026-11-07'), ['2026-11-07', '2026-11-14', '2026-11-21', '2026-11-28'])
+  assert.deepEqual(['2026-11-13', '2026-11-14', '2026-11-15', '2026-11-16'].map(weekendSlot), [0, 1, 2, -1])
+
+  const t = setup() // samedi 7 novembre, 16h20
+  const { people } = await coloc(t, 3)
+  const lea = people['Léa']
+  const sam = people.Sam
+  assert.equal((await t.call('action', { type: 'weekend', sat: '2026-12-05', days: [true, true, true] }, lea)).status, 400, '5e week-end')
+  assert.equal((await t.call('action', { type: 'weekend', sat: '2026-11-08', days: [true, true, true] }, lea)).status, 400, 'pas un samedi')
+  const r = await t.act(lea, { type: 'weekend', sat: '2026-11-07', days: [false, false, false] })
+  assert.equal(r.flash, 'Noté : pas là ce week-end')
+  assert.deepEqual(r.state.weekends['2026-11-07'][lea.memberId].days, [false, false, false])
+  const r2 = await t.act(sam, { type: 'weekend', sat: '2026-11-14', days: [true, 'x', false] })
+  assert.equal(r2.flash, 'Noté pour le week-end du 14 nov.')
+  assert.deepEqual(r2.state.weekends['2026-11-14'][sam.memberId].days, [true, null, false])
+  assert.equal((await t.act(sam, { type: 'weekend', sat: '2026-11-14', days: [null, null, null] })).state.weekends['2026-11-14'], undefined, 'plus rien de dit')
+  assert.equal((await t.act(sam, { type: 'weekend', sat: '2026-11-21', days: [true, true, true] })).flash, 'Noté : tu es là le week-end du 21 nov.')
+
+  // Samedi soir : Léa n'est pas là. Les poubelles et la plante dont elle s'occupe vont aux autres.
+  await t.act(people.huggo, { type: 'remindAdd', text: 'Poubelles', days: [6] })
+  await t.act(lea, { type: 'plantAdd', sp: 'pothos', owner: lea.memberId })
+  t.sent.length = 0
+  await t.api('cron', { method: 'GET', headers: { authorization: 'Bearer sekret' } })
+  const to = (text) => t.sent.filter((x) => x.text === text).map((x) => x.to).sort()
+  const others = [people.huggo.memberId, sam.memberId].sort()
+  assert.deepEqual(to('Ce soir : poubelles'), others)
+  assert.deepEqual(to('Pothos a soif'), others)
+
+  // Lundi : le week-end passé disparaît ; quelqu'un qui part emporte ses réponses
+  t.tick(2 * 864e5)
+  const mon = await t.get(lea)
+  assert.equal(mon.weekends['2026-11-07'], undefined)
+  assert.ok(mon.weekends['2026-11-21'])
+  const gone = await t.act(people.huggo, { type: 'memberRemove', id: sam.memberId })
+  assert.equal(gone.state.weekends['2026-11-21'], undefined)
 })

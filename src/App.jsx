@@ -5,6 +5,7 @@ import Onboarding from './Onboarding.jsx'
 import { InstallCard, InstallSheet, useInstallAction } from './Install.jsx'
 import { Plantes, PlantNudge, PlantSheet, PlantForm } from './Plants.jsx'
 import { Chat, TalkChip, TalkLast, unreadCount } from './Chat.jsx'
+import { Weekend, WeekendSheet } from './Weekend.jsx'
 import { shrinkPhoto } from './photo.js'
 import { pushStatus, enablePush, resyncPush } from './push.js'
 import {
@@ -314,6 +315,7 @@ function Home({ c }) {
         <LostNudge c={c} />
         <PlantNudge c={c} />
         <Who c={c} />
+        <Weekend c={c} />
         <Soon c={c} />
       </div>
     </div>
@@ -947,6 +949,7 @@ function Sheets({ c, sheet }) {
     case 'pair': return <PairSheet c={c} />
     case 'plant': return <PlantSheet key={sheet.id} {...props} />
     case 'plantForm': return <PlantForm key={sheet.id || 'new'} {...props} />
+    case 'weekend': return <WeekendSheet {...props} />
     default: return null
   }
 }

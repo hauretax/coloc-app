@@ -21,6 +21,9 @@ l'onglet Plantes et un chat.
   « Je l'ai arrosée » note qui et quand (historique), « terre encore humide » repousse le prochain arrosage. Arroser une plante
   pas encore prévue demande confirmation (deux colocs qui arrosent, c'est trop d'eau). La tâche du soir envoie « … a soif »
   à la personne qui s'en occupe (aux autres si elle est en voyage), sinon à tous ceux qui sont là, puis tous les 3 jours si rien ne bouge.
+- **Le week-end** : sur Maison, chacun dit s'il est là le vendredi soir, le samedi, le dimanche (ce week-end et les 3 suivants,
+  rangés par samedi dans `weekends`, effacés une fois passés). Un soir où l'on a dit « pas là » compte comme « en voyage »
+  pour la tâche du soir : les rappels (poubelles) et « … a soif » vont aux autres.
 - **Chat** : un chat pour toute la coloc (200 derniers messages, dans le document de la coloc). « En parler » sur un objet
   trouvé, une soirée, une envie, une course ou une plante ouvre le chat avec l'élément au-dessus du message ; il s'affiche
   avec le message (copie du titre et de la photo au moment de l'envoi), et le dernier message apparaît sous l'élément.

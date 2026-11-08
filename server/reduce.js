@@ -3,6 +3,7 @@
 import {
   KINDS, WHAT, TYPES, IKINDS, STAGES, WHEN_KEYS, MAX_MEMBERS, MIN_MEMBERS, PALETTE, MAX_AHEAD, LISTS, DEVICES,
   todayISO, hm, untilLabel, whenRange, whenPhrase, isISO, dayDiff, listNames, weekday, photoUrl, isoAdd, dayLong, plural,
+  weekendOf, weekendList, weekendSlot, parseISO, MO_SHORT,
 } from '../shared/rules.js'
 import { PLANTS, LIGHT, HUM, FEEDS, LOGS, plantDue, snoozeDays, lastLog } from '../shared/plants.js'
 
@@ -56,7 +57,7 @@ export function upgrade(doc) {
     delete m.tokenHash
   }
   for (const k of ['items', 'reminders', 'lost', 'claims', 'plants', 'chat']) if (!Array.isArray(doc[k])) doc[k] = []
-  for (const k of ['links', 'chatRead']) if (!doc[k] || typeof doc[k] !== 'object') doc[k] = {}
+  for (const k of ['links', 'chatRead', 'weekends']) if (!doc[k] || typeof doc[k] !== 'object') doc[k] = {}
   if (doc.shopping === undefined) doc.shopping = null
   return doc
 }
@@ -120,6 +121,8 @@ export function normalize(ctx) {
   for (const l of [...doc.lost]) {
     if (now - l.at > LOST_MAX_MS) { dropLost(ctx, l); changed = true } else if (checkLost(ctx, l)) changed = true
   }
+  const cur = weekendOf(today)
+  for (const sat of Object.keys(doc.weekends)) if (sat < cur) { delete doc.weekends[sat]; changed = true }
   if (doc.shopping && now - doc.shopping.at > SHOPPING_MS) {
     markSeenKey(doc, 'shopping')
     doc.shopping = null
@@ -127,6 +130,14 @@ export function normalize(ctx) {
   }
   ctx.me = actor
   return changed
+}
+
+/** Pas là ce soir : en voyage, ou a dit « pas là » pour ce soir du week-end (vendredi soir, samedi, dimanche). */
+export function awayTonight(doc, id, today) {
+  if (doc.status[id]?.kind === 'away') return true
+  const i = weekendSlot(today)
+  const w = i >= 0 && doc.weekends[weekendOf(today)]
+  return !!(w && w[id] && w[id].days[i] === false)
 }
 
 /** Appelé une fois par jour en fin d'après-midi (tâche planifiée) : envoie les rappels du jour. */
@@ -142,7 +153,7 @@ export function remindTick(ctx) {
     r.sent = today
     changed = true
     if (r.taken && r.taken.day === today) continue
-    const to = activeMembers(doc).map((m) => m.id).filter((id) => doc.status[id]?.kind !== 'away')
+    const to = activeMembers(doc).map((m) => m.id).filter((id) => !awayTonight(doc, id, today))
     notify(ctx, to, 'Ce soir : ' + lowerFirst(r.text), 'Qui s’en occupe ?',
       [{ l: 'Je m’en occupe', a: 'remindTake', v: r.id }, { l: 'Plus tard', a: 'dismiss' }], 'remind:' + r.id)
   }
@@ -158,7 +169,7 @@ export function plantTick(ctx) {
   const actor = ctx.me
   ctx.me = null
   const today = todayISO(now, doc.tz)
-  const here = activeMembers(doc).map((m) => m.id).filter((id) => doc.status[id]?.kind !== 'away')
+  const here = activeMembers(doc).map((m) => m.id).filter((id) => !awayTonight(doc, id, today))
   const per = new Map()
   let changed = false
   for (const p of doc.plants) {
@@ -373,6 +384,10 @@ function removeMemberData(doc, id) {
   if (doc.noise && doc.noise.by === id) doc.noise = null
   for (const p of doc.plants) if (p.owner === id) p.owner = null
   delete doc.chatRead[id]
+  for (const [sat, w] of Object.entries(doc.weekends)) {
+    delete w[id]
+    if (!Object.keys(w).length) delete doc.weekends[sat]
+  }
 }
 
 const find = (list, id) => list.find((x) => x.id === id)
@@ -397,7 +412,7 @@ export function newColoc({ id, code, name, max, tz, now, member }) {
     status: { [member.id]: { kind: 'home', since: now } },
     door: { closed: false, by: null, at: null },
     noise: null, waiting: [], events: [], ideas: [],
-    items: [], reminders: [], lost: [], claims: [], plants: [], chat: [], chatRead: {}, links: {}, shopping: null,
+    items: [], reminders: [], lost: [], claims: [], plants: [], chat: [], chatRead: {}, weekends: {}, links: {}, shopping: null,
     notifs: { [member.id]: [] }, push: {},
   }
 }
@@ -907,6 +922,24 @@ export function applyAction(ctx, a = {}) {
       return
     }
 
+    /* ----- Le week-end : là ou pas (vendredi soir, samedi, dimanche) ----- */
+    case 'weekend': {
+      const sat = String(a.sat || '')
+      if (!weekendList(today).includes(sat)) throw new ActionError('Choisis un des 4 prochains week-ends')
+      const raw = Array.isArray(a.days) ? a.days : []
+      const days = [0, 1, 2].map((i) => (raw[i] === true || raw[i] === false ? raw[i] : null))
+      const w = doc.weekends[sat] || (doc.weekends[sat] = {})
+      if (days.every((v) => v === null)) delete w[me]
+      else w[me] = { days, at: now }
+      if (!Object.keys(w).length) delete doc.weekends[sat]
+      const d = parseISO(sat)
+      const which = sat === weekendOf(today) ? 'ce week-end' : 'le week-end du ' + d.getUTCDate() + ' ' + MO_SHORT[d.getUTCMonth()]
+      ctx.flash = days.every((v) => v === true) ? 'Noté : tu es là ' + which
+        : days.every((v) => v === false) ? 'Noté : pas là ' + which
+          : 'Noté pour ' + which
+      return
+    }
+
     /* ----- Chat ----- */
     case 'chatSend': {
       const text = msgText(a.text)
@@ -955,6 +988,7 @@ export function publicState(doc, me, now) {
     plants: doc.plants.map((p) => ({ ...p, url: p.photo ? photoUrl(doc.id, p.photo) : null })),
     chat: doc.chat.map((m) => (m.ref && m.ref.photo ? { ...m, ref: { ...m.ref, url: photoUrl(doc.id, m.ref.photo) } } : m)),
     chatRead: (doc.chatRead[me] || {}).at || 0,
+    weekends: doc.weekends,
     version: doc.version || 0,
     notifs: (doc.notifs[me] || []).filter((n) => !n.seen).slice(-10),
     pushCount: (doc.push[me] || []).length,

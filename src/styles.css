@@ -394,6 +394,25 @@ textarea.input{resize:vertical;min-height:64px;line-height:1.4}
 @media (min-width: 760px){
   .plant-grid{grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
 }
+/* Le week-end */
+.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.wk-card>.muted{margin:0}
+.wk{width:100%;border-collapse:collapse;margin-top:8px}
+.wk th,.wk td{padding:6px 0;border-top:1px solid var(--line);text-align:center;font-weight:650}
+.wk thead th{border-top:0;padding:2px 0 6px;font-size:12px;font-weight:750;color:var(--muted);width:19%}
+.wk thead th:first-child{width:auto}
+.wk tbody th{text-align:left}
+.wk tbody th>span{display:inline-flex;vertical-align:middle;margin-left:9px;font-size:15px;font-weight:700}
+.wk tbody th .av{vertical-align:middle}
+.wk-cell{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;font-weight:800;font-size:13px}
+.wk-cell.yes{background:var(--ok-soft);color:var(--ok)}
+.wk-cell.no{background:var(--chip);color:var(--muted)}
+.wk-cell.unk{box-shadow:inset 0 0 0 1.5px var(--line);color:var(--muted)}
+.wk-later{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.wk-later button{display:flex;align-items:baseline;gap:9px;width:100%;border:0;border-radius:12px;padding:8px 10px;background:var(--app);color:var(--ink);text-align:left;cursor:pointer;font-size:14px}
+.wk-later b{flex:none;font-weight:750}
+.wk-later span{color:var(--muted)}
+
 /* Chat */
 .scroll.chat-scroll{padding-top:2px;padding-bottom:14px}
 .msgs{list-style:none;margin:0 auto;padding:0;display:flex;flex-direction:column;gap:3px;max-width:760px}

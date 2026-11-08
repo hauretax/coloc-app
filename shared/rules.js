@@ -91,6 +91,13 @@ export function isoAdd(s, n) {
 }
 export const dayDiff = (a, b) => Math.round((parseISO(a) - parseISO(b)) / 864e5) // a - b, en jours
 export const weekday = (s) => parseISO(s).getUTCDay()
+/** Le samedi du week-end en cours (du lundi au samedi : celui qui vient ; le dimanche : la veille). */
+export const weekendOf = (today) => (weekday(today) === 0 ? isoAdd(today, -1) : isoAdd(today, 6 - weekday(today)))
+export const WEEKENDS_AHEAD = 4
+/** Les week-ends pour lesquels on peut dire si on est là : celui-ci et les 3 suivants (leur samedi). */
+export const weekendList = (today) => Array.from({ length: WEEKENDS_AHEAD }, (_, i) => isoAdd(weekendOf(today), 7 * i))
+/** Vendredi soir, samedi, dimanche : 0, 1, 2 (sinon -1). */
+export const weekendSlot = (day) => ({ 5: 0, 6: 1, 0: 2 })[weekday(day)] ?? -1
 export const isISO = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s)
 
 /** Jour courant (AAAA-MM-JJ) dans le fuseau donné. */
