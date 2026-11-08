@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { InstallSheet, useInstallAction } from './Install.jsx'
-import { Icon, Av, Avs, Label, Stepper, Logo, copyText } from './ui.jsx'
+import { Icon, Av, Label, Stepper, Logo, copyText } from './ui.jsx'
 import { cleanCode, fmtCode, PALETTE, MAX_MEMBERS, MIN_MEMBERS, plural } from '../shared/rules.js'
 
 const CODE_HINT = 'Pas de 0, O, 1, I, L ni d’autres caractères qui se confondent.'
@@ -22,6 +22,25 @@ function deviceKind() {
   if (/Windows/.test(ua)) return 'windows'
   if (/Linux/.test(ua)) return 'linux'
   return 'autre'
+}
+
+/** Case à 6 caractères (code de coloc ou code de connexion). */
+function CodeInput({ id, value, onChange, onEnter, label }) {
+  return (
+    <label className="code-wrap" htmlFor={id}>
+      <input
+        id={id} className="code-input" value={value} maxLength={12}
+        autoComplete="off" autoCapitalize="characters" autoCorrect="off" spellCheck="false" aria-label={label}
+        onChange={(e) => { const r = cleanCode(e.target.value); onChange(r.code, r.bad) }}
+        onKeyDown={(e) => { if (e.key === 'Enter') onEnter() }}
+      />
+      <span className="code-boxes" aria-hidden="true">
+        {Array.from({ length: 6 }, (_, i) => (
+          <span key={i} className={'code-box' + (value[i] ? ' full' : '') + (i === value.length ? ' next' : '')}>{value[i] || ''}</span>
+        ))}
+      </span>
+    </label>
+  )
 }
 
 function Swatches({ value, onChange, taken = [] }) {
@@ -50,6 +69,8 @@ export default function Onboarding({ msg, onDone }) {
   const [claim, setClaim] = useState(null)
   const [claimErr, setClaimErr] = useState('')
   const [tuto, setTuto] = useState(false)
+  const [isNew, setIsNew] = useState(false)
+  const [pairCode, setPairCode] = useState('')
   const { ins, run: install } = useInstallAction({ onTuto: () => setTuto(true) })
   const doneRef = useRef(onDone)
   doneRef.current = onDone
@@ -82,11 +103,21 @@ export default function Onboarding({ msg, onDone }) {
     try { await fn() } catch (e) { setError(e.message) } finally { setBusy(false) }
   }
 
-  const join = () => run(async () => {
-    if (code.length !== 6) throw new Error('Il manque ' + plural(6 - code.length, 'caractère') + '.')
-    const r = await api.join({ code })
+  // Le même champ accepte le code de la coloc et un code de connexion (affiché sur un appareil déjà connecté).
+  const join = (value = code, fromPair = false) => run(async () => {
+    if (value.length !== 6) throw new Error('Il manque ' + plural(6 - value.length, 'caractère') + '.')
+    let r
+    try {
+      r = await api.join({ code: value, device: deviceKind() })
+    } catch (e) {
+      if (fromPair && e.status === 404) throw new Error('Code inconnu ou expiré. Affiches-en un nouveau sur ton autre appareil.')
+      throw e
+    }
+    if (r.session) { onDone(r.session, r.state); return }
+    setCode(value)
     setPreview(r.coloc)
     setColor(r.coloc.color)
+    setIsNew(false)
     go('who')
   })
   const enter = () => run(async () => {
@@ -137,28 +168,18 @@ export default function Onboarding({ msg, onDone }) {
         <section className="card ob-card">
           <h3>Rejoindre une coloc</h3>
           <p className="muted">Tape le code à 6 caractères que tes colocs t’ont donné.</p>
-          <label className="code-wrap" htmlFor="f-code">
-            <input
-              id="f-code" className="code-input" value={code} maxLength={12}
-              autoComplete="off" autoCapitalize="characters" autoCorrect="off" spellCheck="false" aria-label="Code de la coloc"
-              onChange={(e) => { const r = cleanCode(e.target.value); setCode(r.code); setBad(r.bad); setError('') }}
-              onKeyDown={(e) => { if (e.key === 'Enter') join() }}
-            />
-            <span className="code-boxes" aria-hidden="true">
-              {Array.from({ length: 6 }, (_, i) => (
-                <span key={i} className={'code-box' + (code[i] ? ' full' : '') + (i === code.length ? ' next' : '')}>{code[i] || ''}</span>
-              ))}
-            </span>
-          </label>
+          <CodeInput id="f-code" label="Code de la coloc" value={code} onEnter={() => join()}
+            onChange={(v, b) => { setCode(v); setBad(b); setError('') }} />
           <p className={'code-hint' + (error || bad ? ' err' : '')} role={error ? 'alert' : undefined}>
             {error || (bad ? '« ' + bad + ' » n’existe pas dans les codes : on a retiré les caractères qui se confondent.' : CODE_HINT)}
           </p>
-          <button type="button" className="btn btn-primary btn-block" disabled={code.length !== 6 || busy} onClick={join}>
+          <button type="button" className="btn btn-primary btn-block" disabled={code.length !== 6 || busy} onClick={() => join()}>
             {busy ? 'Recherche…' : 'Rejoindre'}
           </button>
         </section>
         <div className="ob-or">ou</div>
         <button type="button" className="btn btn-ghost btn-block" onClick={() => go('create')}><Icon n="plus" s={18} />Créer une coloc</button>
+        <button type="button" className="btn btn-ghost btn-block ob-account" onClick={() => go('pair')}><Icon n="phone" s={18} />J’ai déjà un compte</button>
         {!ins.installed && ins.platform !== 'desktop' ? (
           <div className="ob-install">
             <span className="ob-install-ic"><Icon n="phone" s={19} /></span>
@@ -170,22 +191,6 @@ export default function Onboarding({ msg, onDone }) {
     )
   } else if (step === 'who') {
     const taken = preview.members.map((m) => m.color)
-    const again = (
-      <section className="card ob-card">
-        <h3>Déjà dans la coloc ?</h3>
-        <p className="muted">Nouveau téléphone, ordi… Choisis ton prénom, puis valide depuis l’appareil où tu utilises déjà l’appli.</p>
-        <ul className="claim-list">
-          {preview.members.map((m) => (
-            <li key={m.id}>
-              <button type="button" className="claim-row" disabled={busy} onClick={() => startClaim(m)}>
-                <Av p={m} s={34} /><b>{m.name}</b><span>C’est moi</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-        {claimErr ? <p className="code-hint err" role="alert">{claimErr}</p> : null}
-      </section>
-    )
     inner = (
       <>
         {back}
@@ -195,28 +200,42 @@ export default function Onboarding({ msg, onDone }) {
           <p className="muted">
             {plural(preview.members.length, 'habitant')} sur {preview.max} · {preview.full ? 'complète' : plural(preview.free, 'place') + ' libre' + (preview.free > 1 ? 's' : '')}
           </p>
-          <span style={{ '--ring': 'var(--app)' }}><Avs people={preview.members} s={36} /></span>
         </div>
+        <section className="card ob-card">
+          <h3>Qui es-tu ?</h3>
+          <p className="muted">Déjà dans la coloc (sur ton téléphone, ton ordi…) ? Choisis ton prénom : tu retrouves ton compte.</p>
+          <ul className="claim-list">
+            {preview.members.map((m) => (
+              <li key={m.id}>
+                <button type="button" className="claim-row" disabled={busy} onClick={() => startClaim(m)}>
+                  <Av p={m} s={34} /><b>{m.name}</b><span>C’est moi</span>
+                </button>
+              </li>
+            ))}
+            {preview.full ? null : (
+              <li>
+                <button type="button" className="claim-row claim-new" aria-expanded={isNew} onClick={() => setIsNew(true)}>
+                  <span className="claim-plus"><Icon n="plus" s={18} /></span><b>Première fois ici</b><span>Je m’inscris</span>
+                </button>
+              </li>
+            )}
+          </ul>
+          {claimErr ? <p className="code-hint err" role="alert">{claimErr}</p> : null}
+        </section>
         {preview.full ? (
-          <>
-            {again}
-            <p className="ob-msg">Plus de place pour quelqu’un de nouveau. Quelqu’un de la coloc peut en ajouter une dans ses réglages.</p>
-          </>
-        ) : (
-          <>
-            <section className="card ob-card">
-              <h3>Première fois ici ?</h3>
-              <Label htmlFor="f-name">Ton prénom</Label>
-              <input id="f-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex. : Alex" autoComplete="given-name" maxLength={20}
-                onKeyDown={(e) => { if (e.key === 'Enter') enter() }} />
-              <Label>Ta couleur</Label>
-              <Swatches value={color} onChange={setColor} taken={taken} />
-              {err}
-              <button type="button" className="btn btn-primary btn-block" disabled={busy} onClick={enter}>Entrer dans la coloc</button>
-            </section>
-            {preview.members.length ? again : null}
-          </>
-        )}
+          <p className="ob-msg">Plus de place pour quelqu’un de nouveau. Quelqu’un de la coloc peut en ajouter une dans ses réglages.</p>
+        ) : isNew ? (
+          <section className="card ob-card">
+            <h3>Bienvenue !</h3>
+            <Label htmlFor="f-name">Ton prénom</Label>
+            <input id="f-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex. : Alex" autoComplete="given-name" maxLength={20} autoFocus
+              onKeyDown={(e) => { if (e.key === 'Enter') enter() }} />
+            <Label>Ta couleur</Label>
+            <Swatches value={color} onChange={setColor} taken={taken} />
+            {err}
+            <button type="button" className="btn btn-primary btn-block" disabled={busy} onClick={enter}>Entrer dans la coloc</button>
+          </section>
+        ) : null}
       </>
     )
   } else if (step === 'claim') {
@@ -233,6 +252,14 @@ export default function Onboarding({ msg, onDone }) {
           </p>
           <p className="waiting">En attente</p>
         </div>
+        <section className="card ob-card">
+          <h3>Rien ne s’affiche sur ton téléphone ?</h3>
+          <p className="muted">Ouvre Chez nous dessus, puis les réglages de la coloc (icône habitants, en haut de Maison) → « Connecter un appareil ». Tape ici le code affiché :</p>
+          <CodeInput id="f-pair2" label="Code de connexion" value={pairCode} onEnter={() => join(pairCode, true)}
+            onChange={(v) => { setPairCode(v); setError('') }} />
+          {err}
+          <button type="button" className="btn btn-primary btn-block" disabled={pairCode.length !== 6 || busy} onClick={() => join(pairCode, true)}>Me connecter</button>
+        </section>
         {claim.asked ? null : (
           <section className="card ob-card">
             <h3>Pas ton téléphone sous la main ?</h3>
@@ -240,8 +267,37 @@ export default function Onboarding({ msg, onDone }) {
             <button type="button" className="btn btn-ghost btn-block" disabled={busy} onClick={askColoc}><Icon n="users" s={18} />Demander à la coloc</button>
           </section>
         )}
-        {err}
         <p className="fine">La demande expire au bout de 10 minutes.</p>
+      </>
+    )
+  } else if (step === 'pair') {
+    inner = (
+      <>
+        {back}
+        <div className="ob-head">
+          <p className="ob-eyebrow">Déjà un compte</p>
+          <h2>Retrouve ton compte</h2>
+          <p className="muted">Tu es déjà dans la coloc sur ton téléphone ou ton ordi ? Ouvre-le aussi ici, avec le même compte.</p>
+        </div>
+        <section className="card ob-card">
+          <h3>Avec ton autre appareil</h3>
+          <ol className="ob-steps">
+            <li>Sur l’appareil où tu es connecté, ouvre Chez nous.</li>
+            <li>Touche l’icône <span className="key"><Icon n="users" s={14} /></span> en haut de Maison, puis « Connecter un appareil ».</li>
+            <li>Tape ici le code qui s’affiche.</li>
+          </ol>
+          <CodeInput id="f-pair" label="Code de connexion" value={pairCode} onEnter={() => join(pairCode, true)}
+            onChange={(v) => { setPairCode(v); setError('') }} />
+          {err}
+          <button type="button" className="btn btn-primary btn-block" disabled={pairCode.length !== 6 || busy} onClick={() => join(pairCode, true)}>
+            {busy ? 'Connexion…' : 'Me connecter'}
+          </button>
+        </section>
+        <section className="card ob-card">
+          <h3>Ton autre appareil n’est pas là ?</h3>
+          <p className="muted">Tape le code de la coloc et choisis ton prénom : un coloc pourra valider pour toi.</p>
+          <button type="button" className="btn btn-ghost btn-block" onClick={() => go('welcome')}>Taper le code de la coloc</button>
+        </section>
       </>
     )
   } else if (step === 'create') {

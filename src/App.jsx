@@ -6,7 +6,7 @@ import { InstallCard, InstallSheet, useInstallAction } from './Install.jsx'
 import { pushStatus, enablePush, resyncPush } from './push.js'
 import {
   KINDS, WHAT, TYPES, IKINDS, STAGES, BUCKETS, MAX_MEMBERS, MIN_MEMBERS, MAX_AHEAD, LISTS, WEEK, WD, WD_LETTER,
-  todayISO, hm, untilLabel, bucket, whenShort, dayShort, isoAdd, listNames, plural, fmtCode, weekday, daysLabel,
+  todayISO, hm, untilLabel, bucket, whenShort, dayShort, isoAdd, listNames, plural, fmtCode, weekday, daysLabel, DEVICES,
 } from '../shared/rules.js'
 
 export default function App() {
@@ -195,7 +195,7 @@ function Coloc({ session, boot, onGone }) {
   const c = {
     st, me: st.me, P, members, status, detail, act, busy, today, now, tz, sinceLabel,
     open: (type, extra) => setSheet({ type, ...extra }), close: () => setSheet(null), setTab, flash: showFlash,
-    session, push, enable,
+    session, push, enable, refresh,
   }
 
   const titles = { home: st.name, agenda: 'Agenda', envies: 'Envies', commun: 'Commun' }
@@ -262,6 +262,7 @@ function Home({ c }) {
   return (
     <div className="home">
       <div className="col">
+        <Claims c={c} />
         <MyStatus c={c} />
         {away ? <><Door c={c} /><Noise c={c} /></> : <><Noise c={c} /><Door c={c} /></>}
         <Tonight c={c} />
@@ -482,6 +483,28 @@ function Soon({ c }) {
       <button type="button" className="btn btn-ghost btn-sm soon-add" onClick={() => c.open('addEvent', { when: 'soir' })}><Icon n="plus" s={16} />Proposer un truc pour ce soir</button>
     </section>
   )
+}
+
+/** Quelqu'un se connecte sur un nouvel appareil : « c'est toi ? » (ou, si on demande l'aide de la coloc, « c'est bien lui ? »). */
+function Claims({ c }) {
+  return (c.st.claims || []).map((k) => {
+    const dev = DEVICES[k.device] || DEVICES.autre
+    const name = c.P(k.member).name
+    const say = (ok) => c.act({ type: ok ? 'claimOk' : 'claimNo', id: k.id })
+    return (
+      <section key={k.id} className="answer tone-cold" role="alert">
+        <div className="eyebrow"><Icon n="phone" s={15} /> Connexion</div>
+        <h3>{k.mine ? 'Sur ' + dev + ' : c’est toi ?' : name + ' se connecte sur ' + dev}</h3>
+        <p>{k.mine
+          ? 'Quelqu’un veut ouvrir ton compte sur ' + dev + '. Si c’est toi, valide : l’autre appareil s’ouvre tout seul.'
+          : name + ' n’a pas son téléphone sous la main. Valide seulement si c’est bien ' + name + '.'}</p>
+        <div className="actions">
+          <button type="button" className="btn btn-primary" disabled={c.busy} onClick={() => say(true)}><Icon n="check" s={18} />{k.mine ? 'Oui, c’est moi' : 'Valider'}</button>
+          <button type="button" className="btn btn-ghost" disabled={c.busy} onClick={() => say(false)}>{k.mine ? 'Non' : 'Refuser'}</button>
+        </div>
+      </section>
+    )
+  })
 }
 
 /** Les rappels du jour (poubelles…) : qui s'en occupe ce soir. */
@@ -872,6 +895,7 @@ function Sheets({ c, sheet }) {
     case 'photo': return <PhotoSheet {...props} />
     case 'tricount': return <TricountSheet {...props} />
     case 'install': return <InstallSheet onClose={c.close} code={c.st.code} />
+    case 'pair': return <PairSheet c={c} />
     default: return null
   }
 }
@@ -1090,7 +1114,8 @@ function ColocSheet({ c }) {
           ? <button type="button" className="btn btn-stop btn-sm" disabled={c.busy} onClick={() => { setConfirm(null); c.act({ type: 'devicesReset' }) }}>Oui, déconnecter</button>
           : <button type="button" className="btn btn-ghost btn-sm" onClick={() => setConfirm('devices')}>Déconnecter les autres</button>) : null}
       </div>
-      <p className="hint">Sur un ordi ou un nouveau téléphone : ouvre l’appli, tape le code de la coloc, puis « C’est moi ».</p>
+      <button type="button" className="btn btn-primary btn-sm conn-btn" onClick={() => c.open('pair')}><Icon n="phone" s={16} />Connecter un appareil</button>
+      <p className="hint">Pour ouvrir ton compte sur ton ordi ou un autre téléphone : un code s’affiche, tu le tapes sur l’autre appareil.</p>
 
       <Label>Tricount</Label>
       <div className="code-row">
@@ -1111,6 +1136,64 @@ function ColocSheet({ c }) {
         ? <button type="button" className="btn btn-stop btn-block" disabled={c.busy} onClick={() => c.act({ type: 'leave' })}>Oui, quitter « {st.name} »</button>
         : <button type="button" className="btn btn-ghost btn-block" onClick={() => setConfirm('leave')}>Quitter la coloc</button>}
       <p className="fine">Tout le monde dans la coloc peut changer ces réglages.</p>
+    </Sheet>
+  )
+}
+
+/** Afficher un code de connexion à taper sur l'autre appareil (ordi, autre téléphone). */
+function PairSheet({ c }) {
+  const [pair, setPair] = useState(null)
+  const [err, setErr] = useState('')
+  const [t, setT] = useState(() => Date.now())
+  const [copied, setCopied] = useState(false)
+  const start = useRef(c.st.devices)
+  const { session, refresh } = c
+  const get = useCallback(async () => {
+    setErr('')
+    setCopied(false)
+    try { setPair(await api.pair(session)) } catch (e) { setErr(e.message) }
+  }, [session])
+  useEffect(() => { get() }, [get])
+  // Toutes les secondes pour le compte à rebours ; on regarde aussi souvent si l'autre appareil est entré.
+  useEffect(() => {
+    const i = setInterval(() => setT(Date.now()), 1000)
+    const j = setInterval(() => refresh(), 3000)
+    return () => { clearInterval(i); clearInterval(j) }
+  }, [refresh])
+  const done = c.st.devices > start.current
+  const left = pair ? Math.max(0, Math.ceil((pair.exp - t) / 1000)) : 0
+  const link = pair ? location.origin + '/?code=' + pair.code : ''
+  return (
+    <Sheet title="Connecter un appareil" onClose={c.close}>
+      {done ? (
+        <div className="pair-done">
+          <span className="pair-ok"><Icon n="check" s={26} /></span>
+          <h4>C’est bon, ton compte est ouvert sur l’autre appareil</h4>
+          <p className="muted">Tu peux t’en servir comme ici. Ce téléphone reste connecté.</p>
+          <button type="button" className="btn btn-primary btn-block" onClick={c.close}>OK</button>
+        </div>
+      ) : (
+        <>
+          <p className="muted">Sur ton ordi ou ton autre téléphone, ouvre <b>{location.host}</b>, puis tape ce code dans la case « Rejoindre » :</p>
+          {err ? <p className="code-hint err" role="alert">{err}</p> : null}
+          {pair && left > 0 ? (
+            <>
+              <div className="pair-code" aria-label={'Code ' + pair.code.split('').join(' ')}>{fmtCode(pair.code)}</div>
+              <p className="hint">Valable encore {Math.floor(left / 60)} min {String(left % 60).padStart(2, '0')} s, une seule fois.</p>
+              <div className="code-row pair-actions">
+                <button type="button" className="btn btn-ghost btn-sm" onClick={async () => setCopied(await copyText(link))}><Icon n={copied ? 'check' : 'copy'} s={16} />{copied ? 'Lien copié' : 'Copier le lien'}</button>
+              </div>
+              <p className="hint">Le lien fait la même chose : envoie-le-toi et ouvre-le sur l’autre appareil.</p>
+            </>
+          ) : pair ? (
+            <>
+              <p className="ob-msg">Ce code a expiré.</p>
+              <button type="button" className="btn btn-primary btn-block" onClick={get}>Nouveau code</button>
+            </>
+          ) : err ? <button type="button" className="btn btn-primary btn-block" onClick={get}>Réessayer</button> : <p className="waiting">Création du code</p>}
+          <p className="fine">Ne le donne à personne : ce code ouvre ton compte.</p>
+        </>
+      )}
     </Sheet>
   )
 }

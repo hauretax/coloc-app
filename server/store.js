@@ -2,9 +2,10 @@
 // En prod : Redis (Upstash, branché via Vercel). En local et en test : en mémoire.
 import { Redis } from '@upstash/redis'
 
-export function memoryStore() {
+export function memoryStore(clock = () => Date.now()) {
   const docs = new Map()
   const kv = new Map()
+  const tmp = new Map() // expiration des codes temporaires
   const sets = new Map()
   return {
     kind: 'memory',
@@ -21,11 +22,29 @@ export function memoryStore() {
       doc.version = expected + 1
       return true
     },
-    async codeGet(code) { return kv.get('code:' + code) || null },
+    async codeGet(code) {
+      const k = 'code:' + code
+      if (tmp.has(k) && tmp.get(k) <= clock()) { kv.delete(k); tmp.delete(k) }
+      return kv.get(k) || null
+    },
     async codeClaim(code, id) {
-      if (kv.has('code:' + code)) return false
+      if (await this.codeGet(code)) return false
       kv.set('code:' + code, id)
       return true
+    },
+    /** Code temporaire (connexion d'un appareil), dans le même espace que les codes de coloc. */
+    async codeClaimTemp(code, value, ttlSec) {
+      if (await this.codeGet(code)) return false
+      kv.set('code:' + code, value)
+      tmp.set('code:' + code, clock() + ttlSec * 1000)
+      return true
+    },
+    /** Lit et supprime d'un coup : un code de connexion ne sert qu'une fois. */
+    async codeTake(code) {
+      const v = await this.codeGet(code)
+      kv.delete('code:' + code)
+      tmp.delete('code:' + code)
+      return v
     },
     async codeDel(code) { kv.delete('code:' + code) },
     async photoPut(key, b64) { kv.set('photo:' + key, b64) },
@@ -76,6 +95,8 @@ export function redisStore(url, token) {
     },
     async codeGet(code) { return (await r.get('code:' + code)) || null },
     async codeClaim(code, id) { return (await r.set('code:' + code, id, { nx: true })) === 'OK' },
+    async codeClaimTemp(code, value, ttlSec) { return (await r.set('code:' + code, value, { nx: true, ex: ttlSec })) === 'OK' },
+    async codeTake(code) { return (await r.getdel('code:' + code)) || null },
     async codeDel(code) { await r.del('code:' + code) },
     // Photos « à qui est-ce ? » : en base64, avec une durée de vie (supprimées plus tôt si l'objet est réclamé).
     async photoPut(key, b64, ttlSec) { await r.set('photo:' + key, b64, { ex: ttlSec }) },

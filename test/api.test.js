@@ -14,7 +14,7 @@ function setup() {
     publicKey: 'test-key',
     async send(doc, out) { for (const o of out) sent.push({ to: o.to, text: o.n.text, image: o.n.image, quiet: o.n.quiet }); return [] },
   }
-  const store = memoryStore()
+  const store = memoryStore(() => now)
   const api = makeApi({ store, push, clock: () => now, cronSecret: 'sekret' })
   const auth = (s) => ({ authorization: `Bearer ${s.colocId}.${s.memberId}.${s.token}` })
   const call = async (route, body, session, method = 'POST') => {
@@ -237,6 +237,52 @@ test('nouvel appareil sans son téléphone : un coloc valide, ou refuse', async 
   const late = (await t.call('claim', { code, member: sam.id })).json.claim
   t.tick(11 * 60e3)
   assert.equal((await t.call('claim', late)).status, 410)
+})
+
+test('code de connexion : affiché sur le téléphone, tapé sur le PC, même compte', async () => {
+  const t = setup()
+  const { code, people } = await coloc(t, 3)
+  const lea = people['Léa']
+  // il faut être connecté pour afficher un code
+  assert.equal((await t.call('pair', {})).status, 401)
+  const p = await t.call('pair', {}, lea)
+  assert.equal(p.status, 200, JSON.stringify(p.json))
+  assert.match(p.json.code, new RegExp(`^[${ALPHABET}]{6}$`))
+  assert.notEqual(p.json.code, code)
+  // une demande « c'est moi » en attente : visible sur le téléphone de Léa, pas chez Sam
+  const preview = (await t.call('join', { code })).json.coloc
+  const claim = (await t.call('claim', { code, member: lea.memberId, device: 'windows' })).json.claim
+  const mine = (await t.get(lea)).claims
+  assert.equal(mine.length, 1)
+  assert.deepEqual([mine[0].device, mine[0].mine, mine[0].id], ['windows', true, claim.id])
+  assert.equal((await t.get(people.Sam)).claims.length, 0)
+  assert.ok(preview.members.length === 3)
+  // le PC tape le code dans la même case que le code de la coloc
+  const pc = await t.call('join', { code: p.json.code.toLowerCase(), device: 'windows' })
+  assert.equal(pc.status, 200, JSON.stringify(pc.json))
+  assert.equal(pc.json.session.memberId, lea.memberId)
+  assert.equal(pc.json.session.colocId, lea.colocId)
+  assert.equal(pc.json.state.devices, 2)
+  assert.equal((await t.call('state', {}, pc.json.session, 'GET')).status, 200)
+  assert.equal((await t.call('state', {}, lea, 'GET')).status, 200)
+  assert.ok(t.sent.some((s) => s.to === lea.memberId && s.text === 'Ton compte est ouvert sur un PC Windows' && s.quiet))
+  // la demande « c'est moi » ne sert plus : elle disparaît
+  const after = await t.get(lea)
+  assert.equal(after.claims.length, 0)
+  assert.ok(!after.notifs.some((n) => n.key === 'claim:' + claim.id))
+  assert.equal((await t.call('claim', claim)).status, 410)
+  // un code ne sert qu'une fois
+  assert.equal((await t.call('join', { code: p.json.code })).status, 404)
+  // un code de connexion ne permet pas de demander « c'est moi »
+  const p2 = (await t.call('pair', {}, lea)).json
+  assert.equal((await t.call('claim', { code: p2.code, member: lea.memberId })).status, 404)
+  // et il expire au bout de 10 minutes
+  t.tick(10 * 60e3 + 1)
+  assert.equal((await t.call('join', { code: p2.code })).status, 404)
+  // quelqu'un retiré de la coloc ne peut plus s'en servir
+  const p3 = (await t.call('pair', {}, people.Sam)).json
+  await t.act(people.huggo, { type: 'memberRemove', id: people.Sam.memberId })
+  assert.equal((await t.call('join', { code: p3.code })).status, 410)
 })
 
 test('une coloc créée avant les appareils multiples marche toujours', async () => {

@@ -3,11 +3,13 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { ALPHABET, CODE_LENGTH, cleanCode } from '../shared/rules.js'
 import {
   ActionError, makeCtx, normalize, applyAction, publicState, newColoc, addMember,
-  joinPreview, rid, upgrade, addClaim, askOthers, addToken, remindTick,
+  joinPreview, rid, upgrade, addClaim, askOthers, addToken, remindTick, pairDevice,
 } from './reduce.js'
 
 const PHOTO_TTL = 120 * 86400 // secondes ; l'objet disparaît de la liste avant (90 jours au plus)
 const PHOTO_MAX = 1_400_000 // caractères base64, soit environ 1 Mo
+const PAIR_TTL = 600 // secondes : durée de vie d'un code de connexion
+const PAIR = 'pair:' // les codes de connexion partagent l'espace des codes de coloc (jamais de doublon)
 const isId = (v) => typeof v === 'string' && /^[A-Za-z0-9_]{3,40}$/.test(v)
 
 const hash = (t) => createHash('sha256').update(String(t)).digest('hex')
@@ -37,6 +39,11 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
   }
 
   const load = async (id) => upgrade(await store.get(id))
+  /** Le code d'une coloc (pas un code de connexion). */
+  const colocFor = async (code) => {
+    const v = await store.codeGet(code)
+    return v && !v.startsWith(PAIR) ? v : null
+  }
 
   /** Lit, modifie, écrit ; recommence si quelqu'un a écrit en même temps. */
   async function mutate(id, fn) {
@@ -95,6 +102,23 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
     }
   }
 
+  /** Le code tapé est un code de connexion : on ouvre le compte sur ce nouvel appareil. */
+  async function pairRedeem(code, device) {
+    const ref = await store.codeTake(code)
+    if (!ref || !ref.startsWith(PAIR)) throw new ActionError('Ce code a expiré ou a déjà servi. Affiches-en un nouveau.', 404)
+    const [colocId, memberId] = ref.slice(PAIR.length).split(':')
+    const now = clock()
+    const token = randomBytes(24).toString('base64url')
+    const { doc, out } = await mutate(colocId, (d) => {
+      const ctx = makeCtx(d, null, now)
+      normalize(ctx)
+      pairDevice(ctx, memberId, hash(token), device)
+      return { out: ctx.out }
+    })
+    await sendPushes(doc, out)
+    return { status: 200, json: { session: { colocId, memberId, token }, state: publicState(doc, memberId, now) } }
+  }
+
   const routes = {
     async vapid() {
       return { status: 200, json: { key: push.publicKey || null } }
@@ -121,7 +145,9 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
       await rateLimit('join:' + ip, 40, 600)
       const { code } = cleanCode(body.code)
       if (code.length !== CODE_LENGTH) throw new ActionError('Le code fait 6 caractères.')
-      const id = await store.codeGet(code)
+      const ref = await store.codeGet(code)
+      if (ref && ref.startsWith(PAIR)) return pairRedeem(code, body.device)
+      const id = ref
       const found = id && (await load(id))
       if (!found) throw new ActionError('Aucune coloc avec ce code. Vérifie-le avec tes colocs.', 404)
       // L'aperçu s'affiche même si la coloc est pleine : on peut toujours s'y reconnecter (« c'est moi »).
@@ -190,7 +216,7 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
       if (body.code) {
         await rateLimit('claim:' + ip, 10, 600)
         const { code } = cleanCode(body.code)
-        const id = code.length === CODE_LENGTH && (await store.codeGet(code))
+        const id = code.length === CODE_LENGTH && (await colocFor(code))
         if (!id) throw new ActionError('Aucune coloc avec ce code.', 404)
         if (!isId(body.member)) throw new ActionError('Choisis ton prénom.')
         const claimId = rid('k')
@@ -231,6 +257,22 @@ export function makeApi({ store, push, clock = () => Date.now(), cronSecret = nu
       if (res.pending) return { status: 200, json: { pending: true, asked: !!res.asked } }
       const session = { colocId: res.doc.id, memberId: res.memberId, token }
       return { status: 200, json: { session, state: publicState(res.doc, res.memberId, now) } }
+    },
+
+    /** Un appareil connecté affiche un code de connexion (10 min, une seule fois) à taper sur l'autre. */
+    async pair({ method, headers }) {
+      if (method !== 'POST') throw new ActionError('Méthode non permise', 405)
+      const auth = parseAuth(headers)
+      const doc = await load(auth.colocId)
+      checkMember(doc, auth)
+      await rateLimit('pair:' + auth.memberId, 10, 600)
+      for (let i = 0; i < 20; i++) {
+        const code = randomCode()
+        if (await store.codeClaimTemp(code, PAIR + doc.id + ':' + auth.memberId, PAIR_TTL)) {
+          return { status: 200, json: { code, exp: clock() + PAIR_TTL * 1000 } }
+        }
+      }
+      throw new ActionError('Impossible de créer un code, réessaie.', 500)
     },
 
     /** Photos « à qui est-ce ? » : envoi (habitant connecté) et affichage (lien impossible à deviner). */

@@ -307,6 +307,20 @@ a.btn{color:inherit;text-decoration:none}
 .ob-install p{margin:0;flex:1;display:flex;flex-direction:column;gap:1px;font-size:13.5px;color:var(--muted);line-height:1.35}
 .ob-install b{color:var(--ink);font-size:15px}
 .ob-install-ic{flex:none;width:36px;height:36px;border-radius:11px;background:var(--brass-soft);color:var(--brass-ink);display:grid;place-items:center}
+/* Retrouver son compte sur un autre appareil */
+.claim-row .claim-plus{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:var(--brass-soft);color:var(--brass-ink);flex:none}
+.claim-new{border:1.5px dashed var(--line);padding:7.5px 10.5px}
+.claim-new[aria-expanded="true"]{border:2px solid var(--brass);padding:7px 10px}
+.ob-account{margin-top:0}
+.ob-steps{margin:6px 0 4px;padding-left:20px;display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:14.5px;line-height:1.55}
+.ob-steps li::marker{color:var(--brass-ink);font-weight:800}
+.conn-btn{margin-top:10px}
+.pair-code{font:800 46px/1 var(--f-display);letter-spacing:.14em;text-align:center;padding:18px 0 14px;margin:12px 0 8px;border-radius:18px;background:var(--surface);box-shadow:inset 0 0 0 1.5px var(--line);font-variant-numeric:tabular-nums;user-select:all}
+.pair-actions{margin:12px 0 4px}
+.pair-done{display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;padding:12px 0 4px}
+.pair-done h4{margin:4px 0 0;font:750 21px/1.2 var(--f-display);text-wrap:balance}
+.pair-done p{margin:0}
+.pair-ok{width:56px;height:56px;border-radius:50%;display:grid;place-items:center;background:var(--ok-soft, var(--brass-soft));color:var(--ok, var(--brass-ink))}
 @media (prefers-reduced-motion: reduce){ *{animation:none !important} }
 
 /* ---------- Ordinateur ---------- */

@@ -187,6 +187,21 @@ export function askOthers(ctx, claim) {
     [{ l: 'Valider', a: 'claimOk', v: claim.id }, { l: 'Refuser', a: 'claimNo', v: claim.id }], 'claim:' + claim.id)
 }
 
+/** Connexion avec un code affiché sur un appareil déjà connecté : pas besoin de valider. */
+export function pairDevice(ctx, memberId, tokenHash, device) {
+  const { doc } = ctx
+  const m = find(doc.members, memberId)
+  if (!m || m.gone) throw new ActionError('Tu ne fais plus partie de cette coloc.', 410)
+  const dev = DEVICES[device] ? device : 'autre'
+  addToken(doc, m.id, tokenHash)
+  // Les demandes « c'est moi » encore en attente ne servent plus à rien.
+  for (const cl of doc.claims) if (cl.member === m.id && cl.ok === null) markSeenKey(doc, 'claim:' + cl.id)
+  doc.claims = doc.claims.filter((c) => !(c.member === m.id && c.ok === null))
+  notify(ctx, [m.id], 'Ton compte est ouvert sur ' + DEVICES[dev],
+    'Si ce n’était pas toi, déconnecte tes autres appareils dans les réglages de la coloc.', [], 'pair', { quiet: true, seen: true })
+  return m
+}
+
 /** Donne une clé de plus à quelqu'un (un appareil de plus). */
 export function addToken(doc, memberId, tokenHash) {
   const m = find(doc.members, memberId)
@@ -698,5 +713,9 @@ export function publicState(doc, me, now) {
     notifs: (doc.notifs[me] || []).filter((n) => !n.seen).slice(-10),
     pushCount: (doc.push[me] || []).length,
     devices: m ? m.tokens.length : 0,
+    // Demandes « c'est moi » en attente : les miennes, et celles où l'on demande l'aide de la coloc.
+    claims: doc.claims
+      .filter((c) => c.ok === null && c.exp > now && (c.member === me || c.asked))
+      .map((c) => ({ id: c.id, member: c.member, device: c.device, at: c.at, exp: c.exp, asked: c.asked, mine: c.member === me })),
   }
 }

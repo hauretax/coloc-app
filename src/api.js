@@ -75,5 +75,6 @@ export const api = {
   action: (session, body) => call('action', { method: 'POST', body, session }),
   vapid: () => call('vapid'),
   claim: (body) => call('claim', { method: 'POST', body }),
+  pair: (session) => call('pair', { method: 'POST', body: {}, session }),
   photo: (session, data) => call('photo', { method: 'POST', body: { data }, session }),
 }
